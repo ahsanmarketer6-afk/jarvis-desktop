@@ -93,7 +93,40 @@ function renderChat(container) {
           el('div', { class: 'subsys-name' }, 'NEURAL SUBSTRATE'),
           el('div', { class: 'subsys-sub' }, 'Phase 1 Standby Skeleton • Nominal'))
       )
-    )
+    ),
+    /* core status card (fills sidebar bottom space) */
+    (() => {
+      const RING_R = 26, CIRC = (2 * Math.PI * RING_R).toFixed(1);
+      const ringBox = el('div', { class: 'ring', html: '<svg width="66" height="66"><circle cx="33" cy="33" r="' + RING_R + '" fill="none" stroke="#1c1f1c" stroke-width="4"></circle><circle class="ring-fg" cx="33" cy="33" r="' + RING_R + '" fill="none" stroke="#2ee6a8" stroke-width="4" stroke-linecap="round" stroke-dasharray="' + CIRC + '" stroke-dashoffset="' + CIRC + '" transform="rotate(-90 33 33)"></circle></svg><div class="ring-val">94%</div>' });
+      const upVal = el('b', {}, '00:00:00');
+      const t0 = Date.now();
+      setInterval(() => {
+        if (!document.body.contains(upVal)) return;
+        const s = Math.floor((Date.now() - t0) / 1000);
+        upVal.textContent = String(Math.floor(s / 3600)).padStart(2, '0') + ':' + String(Math.floor((s % 3600) / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+      }, 1000);
+      setTimeout(() => {
+        const fg = ringBox.querySelector('.ring-fg');
+        if (fg) { fg.style.transition = 'stroke-dashoffset 1.4s ease'; fg.style.strokeDashoffset = '38'; }
+      }, 350);
+      return el('div', { class: 'hud-card', style: 'margin-top:auto' },
+        el('div', { class: 'hud-title' }, el('span', {}, el('span', { class: 'ht-ic' }, '◈'), 'CORE STATUS'), el('span', { class: 'hud-tag' }, 'SECURE')),
+        el('div', { class: 'ring-wrap' },
+          ringBox,
+          el('div', { class: 'ring-info' },
+            el('div', { class: 'ring-name' }, 'ALL SYSTEMS'),
+            el('div', { class: 'ring-sub' }, '● <b>NOMINAL</b> — vault encrypted'),
+            el('div', { class: 'ring-sub' }, '31 agents • 12 running'))
+        ),
+        el('div', { class: 'side-kv' }, el('span', {}, 'UPTIME'), upVal),
+        el('div', { class: 'side-kv' }, el('span', {}, 'SESSION COST'), el('b', {}, '$0.042')),
+        el('div', { class: 'side-kv' }, el('span', {}, 'NEXT BACKUP'), el('b', {}, '11:30 PM')),
+        el('div', { class: 'side-actions' },
+          el('button', { class: 'btn small', onclick: () => { const mm = document.getElementById('mic-master'); if (mm) mm.click(); } }, 'MIC'),
+          el('button', { class: 'btn small', onclick: () => toast('Focus mode: notifications muted 1h (mock)') }, 'FOCUS'),
+          el('button', { class: 'btn small', onclick: () => confirmModal('Lock UI?', 'Vault lock — resume ke liye boot screen aayegi.', () => { document.getElementById('app').classList.add('hidden'); document.getElementById('boot-screen').classList.remove('hidden'); }) }, 'LOCK'))
+      );
+    })()
   );
 
   /* live telemetry jitter */
@@ -107,42 +140,91 @@ function renderChat(container) {
     latBar.style.width = (28 + Math.round(Math.random() * 20)) + '%';
   }, 2600);
 
-  /* ── CENTER: globe + state bar + call controls ── */
+  /* ── CENTER: globe + call controls (above) + state tabs (below) ── */
   const stateChip = el('b', {}, 'IDLE');
   const globeStage = el('div', { class: 'globe-stage' });
+
+  const micBtn = el('button', { class: 'call-btn mic-on', id: 'mic-master', title: 'Microphone — ON (click to mute)', onclick: () => {
+    chatState.micOn = !chatState.micOn;
+    micBtn.classList.toggle('mic-on', chatState.micOn);
+    micBtn.title = chatState.micOn ? 'Microphone — ON (click to mute)' : 'Microphone — MUTED (click to unmute)';
+    if (!chatState.micOn && chatState.state === 'listening') applyState('idle');
+    toast(chatState.micOn ? '🎙 Microphone ON — aap bol sakte hain' : '🎙 Microphone MUTED');
+  } }, '🎙');
+  const camBtn = el('button', { class: 'call-btn', id: 'cam-master', title: 'Camera — click to open camera feed', onclick: () => {
+    openCameraModal();
+  } }, '📷');
+  const callBtn = el('button', { class: 'call-btn call-active', id: 'call-master', title: 'Voice session — live with Jarvis (click to end)', onclick: () => {
+    chatState.callLive = !chatState.callLive;
+    callBtn.classList.toggle('call-active', chatState.callLive);
+    callBtn.innerHTML = chatState.callLive ? '✕' : '✆';
+    if (chatState.callLive) {
+      chatState.micOn = true; micBtn.classList.add('mic-on');
+      applyState('listening');
+      toast('✆ Voice session live — boliye Boss');
+      pushMsg({ role: 'user', text: '(voice session started)' });
+    } else {
+      applyState('idle');
+      toast('Voice session ended');
+    }
+  } }, '✕');
+
   const center = el('div', { class: 'globe-center' },
     el('div', { class: 'globe-top-row' },
       el('span', { class: 'hud-tag' }, '◉ NEURAL HARMONIC CORE'),
       el('span', { class: 'state-chip' }, 'STATE: ', stateChip)
     ),
     globeStage,
+    el('div', { class: 'call-bar' }, camBtn, callBtn, micBtn),
     el('div', { class: 'state-bar' },
       ...[
         ['idle', '◉', 'Idle'], ['listening', '((•))', 'Listening'],
         ['thinking', '⌘', 'Thinking'], ['speaking', '≈', 'Speaking']
       ].map(([id, ic, label]) =>
         el('button', { class: 'state-btn' + (id === 'idle' ? ' on' : ''), 'data-state': id,
-          onclick: (e) => {
-            setGlobeState(id);
-            document.querySelectorAll('.state-btn').forEach(b => b.classList.toggle('on', b.dataset.state === id));
-          } }, el('span', {}, ic), label))
-    ),
-    el('div', { class: 'call-bar' },
-      el('button', { class: 'call-btn', title: 'Video call (mock)' }, '▣'),
-      el('button', { class: 'call-btn mic-on', id: 'mic-master', title: 'Toggle microphone', onclick: (e) => {
-        chatState.micOn = !chatState.micOn;
-        e.currentTarget.classList.toggle('mic-on', chatState.micOn);
-        setGlobeState(chatState.micOn ? 'listening' : 'idle');
-        document.querySelectorAll('.state-btn').forEach(b => b.classList.toggle('on', b.dataset.state === (chatState.micOn ? 'listening' : 'idle')));
-      } }, '🎙'),
-      el('button', { class: 'call-btn', title: 'Mute (mock)' }, '◎')
+          onclick: () => applyState(id) }, el('span', {}, ic), label))
     )
   );
+
+  chatState.callLive = true;
+
+  function applyState(id) {
+    setGlobeState(id);
+    document.querySelectorAll('.state-btn').forEach(b => b.classList.toggle('on', b.dataset.state === id));
+  }
 
   function setGlobeState(s) {
     chatState.state = s;
     stateChip.textContent = s.toUpperCase();
     if (window.NeuralGlobe) window.NeuralGlobe.setState(s);
+  }
+
+  /* camera feed modal — real getUserMedia stream */
+  function openCameraModal() {
+    const video = el('video', { autoplay: '', playsinline: '', style: 'width:100%;border-radius:10px;background:#000;max-height:340px;object-fit:cover' });
+    const status = el('div', { class: 'form-hint' }, '◌ Requesting camera access…');
+    let stream = null;
+    const m = openModal({
+      title: 'CAMERA FEED',
+      sub: 'Screen Vision agent • live camera preview',
+      body: el('div', {}, video, status),
+      actions: [
+        el('button', { class: 'btn', onclick: () => { if (stream) stream.getTracks().forEach(tr => tr.stop()); closeModal(); } }, 'CLOSE FEED'),
+        el('button', { class: 'btn primary', onclick: () => {
+          if (!stream) { status.textContent = '◌ No active stream — camera permission dein.'; return; }
+          status.innerHTML = '<span class="form-ok">✓ Snapshot captured → Screen Vision analysis queue (mock).</span>';
+        } }, '◉ CAPTURE SNAPSHOT')
+      ]
+    });
+    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+      navigator.mediaDevices.getUserMedia({ video: true })
+        .then(s => { stream = s; video.srcObject = s; status.innerHTML = '<span class="form-ok">● LIVE — camera feed active</span>'; })
+        .catch(() => { status.innerHTML = '<span class="form-err">✕ Camera access denied/na ho — Windows privacy settings check karein.</span>'; });
+    } else status.innerHTML = '<span class="form-err">✕ Camera API not available.</span>';
+    const obs = new MutationObserver(() => {
+      if (!document.body.contains(video)) { if (stream) stream.getTracks().forEach(tr => tr.stop()); obs.disconnect(); }
+    });
+    obs.observe(document.getElementById('modal-root'), { childList: true, subtree: true });
   }
 
   /* ── RIGHT: transcript + composer ── */
@@ -165,18 +247,15 @@ function renderChat(container) {
         el('span', {}, '◉ TRANSCRIPT'),
         el('span', { class: 'hud-tag gray' }, 'Gemini (gemini-2.0-flash)')),
       scroll,
-      el('div', { class: 'composer' }, input, el('button', { class: 'call-btn', style: 'width:38px;height:38px;font-size:14px', title: 'Voice input', onclick: () => {
-        if (chatState.micOn) return;
-        chatState.micOn = true;
-        document.getElementById('mic-master').classList.add('mic-on');
-        setGlobeState('listening');
-        document.querySelectorAll('.state-btn').forEach(b => b.classList.toggle('on', b.dataset.state === 'listening'));
+      el('div', { class: 'composer' }, input, el('button', { class: 'call-btn', style: 'width:38px;height:38px;font-size:14px', title: 'Voice input — dictation (mock)', onclick: (e) => {
+        const btn = e.currentTarget;
+        if (btn.classList.contains('mic-on')) return;
+        btn.classList.add('mic-on');
+        applyState('listening');
         setTimeout(() => {
           input.value = 'Jarvis, kal ki meeting ka follow-up check karo';
-          chatState.micOn = false;
-          const mm = document.getElementById('mic-master'); if (mm) mm.classList.remove('mic-on');
-          setGlobeState('idle');
-          document.querySelectorAll('.state-btn').forEach(b => b.classList.toggle('on', b.dataset.state === 'idle'));
+          btn.classList.remove('mic-on');
+          if (chatState.state === 'listening') applyState('idle');
           doSend();
         }, 2400);
       } }, '🎙'), sendBtn),
