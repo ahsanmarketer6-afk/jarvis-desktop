@@ -81,6 +81,17 @@ const MIGRATIONS = [
         CREATE INDEX IF NOT EXISTS idx_notifications_read ON notifications(is_read);
       `);
     }
+  },
+  {
+    version: 2,
+    name: 'add-selected-model-to-api-keys',
+    up: (db) => {
+      try {
+        db.exec(`ALTER TABLE api_keys ADD COLUMN selected_model TEXT;`);
+      } catch (e) {
+        // column may already exist
+      }
+    }
   }
 ];
 

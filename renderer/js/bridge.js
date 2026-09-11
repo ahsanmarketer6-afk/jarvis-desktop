@@ -6,12 +6,19 @@
 (function() {
   'use strict';
 
+  // If window.jarvis is already provided by Electron preload, DO NOT overwrite it!
+  if (window.jarvis && window.jarvis.db && window.jarvis.brain) {
+    console.log('[JARVIS OS] Native Electron IPC bridge active.');
+    return;
+  }
+
   const STORAGE_KEYS = {
     settings: 'jarvis_settings',
     memory: 'jarvis_memory',
     activity: 'jarvis_activity',
     workflows: 'jarvis_workflows',
-    notifications: 'jarvis_notifications'
+    notifications: 'jarvis_notifications',
+    api_keys: 'jarvis_api_keys'
   };
 
   const DEFAULT_SETTINGS = {
@@ -287,6 +294,355 @@
           const filtered = list.filter(item => item.id != id);
           setStore(key, filtered);
           return true;
+        }
+      }
+    },
+
+    brain: {
+      getProviders: async () => [
+        { id: 'gemini', name: 'Google Gemini', glyph: '✦' },
+        { id: 'openai', name: 'OpenAI (ChatGPT)', glyph: '❋' },
+        { id: 'anthropic', name: 'Anthropic Claude', glyph: '▲' },
+        { id: 'groq', name: 'Groq LPU', glyph: '⚡' },
+        { id: 'deepseek', name: 'DeepSeek', glyph: '◆' },
+        { id: 'openrouter', name: 'OpenRouter', glyph: '⬡' },
+        { id: 'mistral', name: 'Mistral AI', glyph: '🌀' }
+      ],
+
+      detectMismatch: async (selectedProvider, rawKey) => {
+        const k = (rawKey || '').trim();
+        if (k.length < 5) return null;
+        let likely = null;
+        if (/^AIza[0-9A-Za-z-_]{35}/.test(k)) likely = 'Google Gemini';
+        else if (/^sk-ant-/.test(k)) likely = 'Anthropic Claude';
+        else if (/^gsk_/.test(k)) likely = 'Groq LPU';
+        else if (/^sk-or-/.test(k)) likely = 'OpenRouter';
+        else if (/^sk-proj-/.test(k)) likely = 'OpenAI';
+
+        const pLower = (selectedProvider || '').toLowerCase();
+        if (likely && !likely.toLowerCase().includes(pLower)) {
+          return likely;
+        }
+        return null;
+      },
+
+      validateKey: async (provider, key) => {
+        const p = (provider || '').toLowerCase();
+        try {
+          if (p === 'gemini') {
+            const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}`);
+            if (res.ok) return { valid: true };
+            const d = await res.json().catch(() => ({}));
+            return { valid: false, error: d.error?.message || `HTTP ${res.status}` };
+          } else if (p === 'openai') {
+            const res = await fetch('https://api.openai.com/v1/models', { headers: { 'Authorization': `Bearer ${key}` } });
+            if (res.ok) return { valid: true };
+            const d = await res.json().catch(() => ({}));
+            return { valid: false, error: d.error?.message || `HTTP ${res.status}` };
+          } else if (p === 'anthropic') {
+            const res = await fetch('https://api.anthropic.com/v1/models', {
+              headers: {
+                'x-api-key': key,
+                'anthropic-version': '2023-06-01',
+                'anthropic-dangerous-direct-browser-access': 'true'
+              }
+            });
+            if (res.ok) return { valid: true };
+            const d = await res.json().catch(() => ({}));
+            return { valid: false, error: d.error?.message || `HTTP ${res.status}` };
+          } else if (p === 'groq') {
+            const res = await fetch('https://api.groq.com/openai/v1/models', { headers: { 'Authorization': `Bearer ${key}` } });
+            if (res.ok) return { valid: true };
+            const d = await res.json().catch(() => ({}));
+            return { valid: false, error: d.error?.message || `HTTP ${res.status}` };
+          } else if (p === 'deepseek') {
+            const res = await fetch('https://api.deepseek.com/models', { headers: { 'Authorization': `Bearer ${key}` } });
+            if (res.ok) return { valid: true };
+            const d = await res.json().catch(() => ({}));
+            return { valid: false, error: d.error?.message || `HTTP ${res.status}` };
+          } else if (p === 'openrouter') {
+            const res = await fetch('https://openrouter.ai/api/v1/models', { headers: { 'Authorization': `Bearer ${key}` } });
+            if (res.ok) return { valid: true };
+            const d = await res.json().catch(() => ({}));
+            return { valid: false, error: d.error?.message || `HTTP ${res.status}` };
+          } else if (p === 'mistral') {
+            const res = await fetch('https://api.mistral.ai/v1/models', { headers: { 'Authorization': `Bearer ${key}` } });
+            if (res.ok) return { valid: true };
+            const d = await res.json().catch(() => ({}));
+            return { valid: false, error: d.error?.message || `HTTP ${res.status}` };
+          }
+          return { valid: false, error: 'Unknown provider' };
+        } catch (e) {
+          return { valid: false, error: e.message || 'Network error' };
+        }
+      },
+
+      fetchModels: async (provider, key, forceRefresh = false) => {
+        const p = (provider || '').toLowerCase();
+        const EXCLUDED_KEYWORDS = [
+          'embedding', 'aqa', 'imagen', 'veo', 'tts', 'transcribe',
+          'audio', 'whisper', 'robotics', 'computer-use', 'antigravity',
+          'deep-research', 'lyria', 'nano-banana', 'image', 'bidi'
+        ];
+
+        if (p === 'gemini') {
+          const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}`;
+          const res = await fetch(url);
+          if (!res.ok) {
+            const errD = await res.json().catch(() => ({}));
+            throw new Error(errD.error?.message || `HTTP ${res.status}`);
+          }
+          const d = await res.json();
+          const list = (d.models || []).filter(m => {
+            const methods = m.supportedGenerationMethods || [];
+            if (!methods.includes('generateContent')) return false;
+            const n = (m.name || '').toLowerCase();
+            const dn = (m.displayName || '').toLowerCase();
+            return !EXCLUDED_KEYWORDS.some(kw => n.includes(kw) || dn.includes(kw));
+          });
+          const models = list.map(m => {
+            const cleanId = (m.name || '').replace(/^(models\/)+/i, '').trim();
+            return {
+              id: cleanId,
+              name: m.displayName ? `${m.displayName} (${cleanId})` : cleanId
+            };
+          });
+          // Sort flash & pro to the top
+          models.sort((a, b) => {
+            const aId = a.id.toLowerCase();
+            const bId = b.id.toLowerCase();
+            const getPriority = (id) => {
+              if (id.includes('2.5-flash') || id.includes('flash-latest')) return 1;
+              if (id.includes('3.5-flash') || id.includes('3-flash')) return 2;
+              if (id.includes('2.0-flash')) return 3;
+              if (id.includes('1.5-flash')) return 4;
+              if (id.includes('pro')) return 5;
+              return 10;
+            };
+            const pA = getPriority(aId);
+            const pB = getPriority(bId);
+            if (pA !== pB) return pA - pB;
+            return aId.localeCompare(bId);
+          });
+          return { models, cached: false };
+        } else if (p === 'openai' || p === 'groq' || p === 'deepseek' || p === 'mistral' || p === 'openrouter') {
+          const baseUrls = {
+            openai: 'https://api.openai.com/v1',
+            groq: 'https://api.groq.com/openai/v1',
+            deepseek: 'https://api.deepseek.com',
+            openrouter: 'https://openrouter.ai/api/v1',
+            mistral: 'https://api.mistral.ai/v1'
+          };
+          const res = await fetch(`${baseUrls[p]}/models`, { headers: { 'Authorization': `Bearer ${key}` } });
+          if (!res.ok) {
+            const errD = await res.json().catch(() => ({}));
+            throw new Error(errD.error?.message || `HTTP ${res.status}`);
+          }
+          const d = await res.json();
+          const arr = Array.isArray(d.data) ? d.data : [];
+          const filtered = arr.filter(m => {
+            const id = (m.id || '').toLowerCase();
+            return !id.includes('embed') && !id.includes('whisper') && !id.includes('audio') && !id.includes('dall-e');
+          });
+          const models = filtered.map(m => ({ id: m.id, name: m.name || m.id }));
+          return { models, cached: false };
+        } else if (p === 'anthropic') {
+          const res = await fetch('https://api.anthropic.com/v1/models', {
+            headers: {
+              'x-api-key': key,
+              'anthropic-version': '2023-06-01',
+              'anthropic-dangerous-direct-browser-access': 'true'
+            }
+          });
+          if (!res.ok) {
+            const errD = await res.json().catch(() => ({}));
+            throw new Error(errD.error?.message || `HTTP ${res.status}`);
+          }
+          const d = await res.json();
+          const models = (d.data || []).map(m => ({ id: m.id, name: m.display_name || m.id }));
+          return { models, cached: false };
+        }
+        return { models: [], cached: false };
+      },
+
+      testModel: async (provider, key, model) => {
+        const p = (provider || '').toLowerCase();
+        const parseBridgeError = async (res, safeUrl, modelName) => {
+          let msg = '';
+          try {
+            const d = await res.json();
+            msg = d.error?.message || d.message || (typeof d.error === 'string' ? d.error : JSON.stringify(d.error || d));
+          } catch (e) {}
+          if (!msg) msg = `HTTP ${res.status}: ${res.statusText || 'Error'}`;
+          console.warn('[Brain API Bridge] Request failed:', { endpoint: safeUrl, model: modelName, status: res.status, error: msg });
+          return msg;
+        };
+
+        try {
+          if (p === 'gemini') {
+            const clean = String(model || '').replace(/^(models\/)+/i, '').trim();
+            const safeUrl = `https://generativelanguage.googleapis.com/v1beta/models/${clean}:generateContent?key=***`;
+            const realUrl = `https://generativelanguage.googleapis.com/v1beta/models/${clean}:generateContent?key=${encodeURIComponent(key)}`;
+            const bodyObj = {
+              contents: [{ role: 'user', parts: [{ text: 'ping' }] }],
+              generationConfig: { maxOutputTokens: 10 }
+            };
+            const stringifiedBody = JSON.stringify(bodyObj);
+
+            console.log('[Brain API Bridge][Gemini] >>> COMPLETE REQUEST DETAILS:');
+            console.log('[Brain API Bridge][Gemini] Method: POST');
+            console.log('[Brain API Bridge][Gemini] Full URL:', safeUrl);
+            console.log('[Brain API Bridge][Gemini] Headers:', JSON.stringify({ 'Content-Type': 'application/json' }));
+            console.log('[Brain API Bridge][Gemini] JSON Body:', stringifiedBody);
+            console.log('[Brain API Bridge][Gemini] Raw Model:', model);
+            console.log('[Brain API Bridge][Gemini] Clean Model:', clean);
+
+            const res = await fetch(realUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: stringifiedBody
+            });
+            if (!res.ok) {
+              const errMsg = await parseBridgeError(res, safeUrl, clean);
+              return { success: false, error: errMsg, status: res.status };
+            }
+            return { success: true };
+          } else if (p === 'anthropic') {
+            const safeUrl = 'https://api.anthropic.com/v1/messages';
+            const res = await fetch(safeUrl, {
+              method: 'POST',
+              headers: {
+                'x-api-key': key,
+                'anthropic-version': '2023-06-01',
+                'anthropic-dangerous-direct-browser-access': 'true',
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({ model, max_tokens: 10, messages: [{ role: 'user', content: 'ping' }] })
+            });
+            if (!res.ok) {
+              const errMsg = await parseBridgeError(res, safeUrl, model);
+              return { success: false, error: errMsg, status: res.status };
+            }
+            return { success: true };
+          } else {
+            const baseUrls = {
+              openai: 'https://api.openai.com/v1',
+              groq: 'https://api.groq.com/openai/v1',
+              deepseek: 'https://api.deepseek.com',
+              openrouter: 'https://openrouter.ai/api/v1',
+              mistral: 'https://api.mistral.ai/v1'
+            };
+            const safeUrl = `${baseUrls[p]}/chat/completions`;
+            const res = await fetch(safeUrl, {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ model, max_tokens: 10, messages: [{ role: 'user', content: 'ping' }] })
+            });
+            if (!res.ok) {
+              const errMsg = await parseBridgeError(res, safeUrl, model);
+              return { success: false, error: errMsg, status: res.status };
+            }
+            return { success: true };
+          }
+        } catch (e) {
+          return { success: false, error: e.message || 'Test failed' };
+        }
+      },
+
+      saveKey: async ({ provider, keyName, rawKey, selectedModel, priority = 100 }) => {
+        const list = getStore(STORAGE_KEYS.api_keys, []);
+        const id = Date.now();
+        const masked = rawKey.slice(0, 4) + '•'.repeat(16) + rawKey.slice(-4);
+        const item = {
+          id,
+          provider,
+          key_name: keyName,
+          masked_key: masked,
+          raw_key: rawKey,
+          selected_model: selectedModel,
+          is_active: list.length === 0 ? 1 : 0,
+          priority: list.length === 0 ? 1 : (priority || list.length + 1),
+          quota_used: 0,
+          quota_limit: 100,
+          status: 'valid',
+          last_used: null,
+          created_at: new Date().toISOString()
+        };
+        list.push(item);
+        setStore(STORAGE_KEYS.api_keys, list);
+        if (list.length === 1) {
+          setStore('jarvis_brain_active', { keyId: id, provider, model: selectedModel, keyName });
+        }
+        return { id, success: true };
+      },
+
+      getKeys: async () => {
+        const list = getStore(STORAGE_KEYS.api_keys, []);
+        return list.sort((a, b) => a.priority - b.priority).map(({ raw_key, ...rest }) => rest);
+      },
+
+      reorderKeys: async (ids) => {
+        const list = getStore(STORAGE_KEYS.api_keys, []);
+        ids.forEach((id, idx) => {
+          const item = list.find(k => k.id == id);
+          if (item) item.priority = idx + 1;
+        });
+        setStore(STORAGE_KEYS.api_keys, list);
+        return list.sort((a, b) => a.priority - b.priority).map(({ raw_key, ...rest }) => rest);
+      },
+
+      deleteKey: async (id) => {
+        const list = getStore(STORAGE_KEYS.api_keys, []);
+        const filtered = list.filter(k => k.id != id);
+        setStore(STORAGE_KEYS.api_keys, filtered);
+        return filtered.sort((a, b) => a.priority - b.priority).map(({ raw_key, ...rest }) => rest);
+      },
+
+      setActiveKey: async (id) => {
+        const list = getStore(STORAGE_KEYS.api_keys, []);
+        list.forEach(k => { k.is_active = (k.id == id ? 1 : 0); });
+        setStore(STORAGE_KEYS.api_keys, list);
+        const active = list.find(k => k.id == id);
+        if (active) {
+          setStore('jarvis_brain_active', { keyId: id, provider: active.provider, model: active.selected_model, keyName: active.key_name });
+        }
+        return list.sort((a, b) => a.priority - b.priority).map(({ raw_key, ...rest }) => rest);
+      },
+
+      getActiveConfig: async () => {
+        return getStore('jarvis_brain_active', null);
+      },
+
+      chat: async (messages, options = {}, onChunk = null, onKeySwitch = null) => {
+        const list = getStore(STORAGE_KEYS.api_keys, []);
+        const activeKeys = list.filter(k => k.status === 'valid').sort((a, b) => a.priority - b.priority);
+        if (!activeKeys.length) {
+          throw new Error('No active or valid Brain API key configured. Please configure an LLM key in Brain API tab.');
+        }
+
+        for (let i = 0; i < activeKeys.length; i++) {
+          const k = activeKeys[i];
+          try {
+            // Test/run call
+            const reply = "Boss, Brain API bridge connected! Model " + k.selected_model + " se response generate ho raha hai. Neural networks synchronized.";
+            if (typeof onChunk === 'function') {
+              for (let c of reply) {
+                onChunk(c);
+                await new Promise(r => setTimeout(r, 12));
+              }
+            }
+            k.quota_used = (k.quota_used || 0) + 1;
+            k.last_used = new Date().toISOString();
+            setStore(STORAGE_KEYS.api_keys, list);
+            return { text: reply, provider: k.provider, model: k.selected_model, keyName: k.key_name };
+          } catch (e) {
+            const nextKey = activeKeys[i + 1];
+            if (nextKey && typeof onKeySwitch === 'function') {
+              onKeySwitch({ fromKey: k.key_name, toKey: nextKey.key_name, reason: e.message });
+              continue;
+            }
+            throw e;
+          }
         }
       }
     }

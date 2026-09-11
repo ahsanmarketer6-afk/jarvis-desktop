@@ -53,5 +53,39 @@ contextBridge.exposeInMainWorld('jarvis', {
       update: (table, id, obj) => ipcRenderer.invoke('crud:update', table, id, obj),
       delete: (table, id) => ipcRenderer.invoke('crud:delete', table, id)
     }
+  },
+  // Brain API system (The Single LLM Runtime Path)
+  brain: {
+    getProviders: () => ipcRenderer.invoke('brain:getProviders'),
+    detectMismatch: (provider, key) => ipcRenderer.invoke('brain:detectMismatch', provider, key),
+    validateKey: (provider, key) => ipcRenderer.invoke('brain:validateKey', provider, key),
+    fetchModels: (provider, key, forceRefresh) => ipcRenderer.invoke('brain:fetchModels', provider, key, forceRefresh),
+    testModel: (provider, key, model) => ipcRenderer.invoke('brain:testModel', provider, key, model),
+    saveKey: (payload) => ipcRenderer.invoke('brain:saveKey', payload),
+    getKeys: () => ipcRenderer.invoke('brain:getKeys'),
+    reorderKeys: (ids) => ipcRenderer.invoke('brain:reorderKeys', ids),
+    deleteKey: (id) => ipcRenderer.invoke('brain:deleteKey', id),
+    setActiveKey: (id) => ipcRenderer.invoke('brain:setActiveKey', id),
+    getActiveConfig: () => ipcRenderer.invoke('brain:getActiveConfig'),
+    chat: (messages, options = {}, onChunk = null, onKeySwitch = null) => {
+      const requestId = 'req_' + Math.random().toString(36).slice(2, 10);
+      let chunkListener = null;
+      let switchListener = null;
+
+      if (typeof onChunk === 'function') {
+        chunkListener = (_e, chunk) => onChunk(chunk);
+        ipcRenderer.on(`brain:chat:chunk:${requestId}`, chunkListener);
+      }
+      if (typeof onKeySwitch === 'function') {
+        switchListener = (_e, info) => onKeySwitch(info);
+        ipcRenderer.on(`brain:chat:switch:${requestId}`, switchListener);
+      }
+
+      return ipcRenderer.invoke('brain:chat', { messages, options, requestId })
+        .finally(() => {
+          if (chunkListener) ipcRenderer.removeListener(`brain:chat:chunk:${requestId}`, chunkListener);
+          if (switchListener) ipcRenderer.removeListener(`brain:chat:switch:${requestId}`, switchListener);
+        });
+    }
   }
 });

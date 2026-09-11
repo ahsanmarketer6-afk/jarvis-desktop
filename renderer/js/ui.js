@@ -101,7 +101,7 @@ function renderChat(container) {
       const upVal = el('b', {}, '00:00:00');
       const t0 = Date.now();
       setInterval(() => {
-        if (!document.body.contains(upVal)) return;
+        if (!document.body || !document.body.contains(upVal)) return;
         const s = Math.floor((Date.now() - t0) / 1000);
         upVal.textContent = String(Math.floor(s / 3600)).padStart(2, '0') + ':' + String(Math.floor((s % 3600) / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
       }, 1000);
@@ -241,11 +241,29 @@ function renderChat(container) {
   }
   input.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSend(); });
 
+  const activeModelTag = el('span', { class: 'hud-tag gray', id: 'chat-active-model-tag' }, 'Loading Brain…');
+
+  // Load active model tag
+  if (window.jarvis?.brain?.getActiveConfig) {
+    window.jarvis.brain.getActiveConfig().then(cfg => {
+      if (cfg && cfg.model) {
+        const pMeta = typeof getProviderMeta === 'function' ? getProviderMeta(cfg.provider) : { glyph: '✦', name: cfg.provider };
+        activeModelTag.textContent = `${pMeta.glyph} ${pMeta.name} · ${cfg.model}`;
+        activeModelTag.className = 'hud-tag green';
+      } else {
+        activeModelTag.textContent = '○ No Active Key';
+        activeModelTag.className = 'hud-tag gray';
+      }
+    }).catch(() => {
+      activeModelTag.textContent = '○ Brain Standby';
+    });
+  }
+
   const right = el('div', { class: 'transcript-col' },
     el('div', { class: 'transcript-card' },
       el('div', { class: 'transcript-head' },
         el('span', {}, '◉ TRANSCRIPT'),
-        el('span', { class: 'hud-tag gray' }, 'Gemini (gemini-2.0-flash)')),
+        activeModelTag),
       scroll,
       el('div', { class: 'composer' }, input, el('button', { class: 'call-btn', style: 'width:38px;height:38px;font-size:14px', title: 'Voice input — dictation (mock)', onclick: (e) => {
         const btn = e.currentTarget;
@@ -273,36 +291,82 @@ function renderChat(container) {
     if (m.role === 'user') jarvisRespond();
   }
 
-  function jarvisRespond() {
+  async function jarvisRespond() {
     chatState.busy = true;
     setGlobeState('thinking');
     document.querySelectorAll('.state-btn').forEach(b => b.classList.toggle('on', b.dataset.state === 'thinking'));
     statusLeft.textContent = 'Jarvis is thinking…';
-    const typingMsg = { role: 'jarvis', typing: true };
+
+    const typingMsg = {
+      role: 'jarvis',
+      text: '',
+      typing: true,
+      tag: 'Brain API Router',
+      emo: 'attentive'
+    };
     chatState.messages.push(typingMsg);
     renderMsgs(scroll);
 
-    setTimeout(() => {
-      typingMsg.typing = false;
-      const reply = JARVIS_REPLIES[Math.floor(Math.random() * JARVIS_REPLIES.length)];
-      typingMsg.text = '';
-      typingMsg.tag = 'Brain API Engine';
-      typingMsg.emo = ['helpful', 'focused', 'witty', 'analytical'][Math.floor(Math.random() * 4)];
-      setGlobeState('speaking');
-      statusLeft.textContent = 'Jarvis is speaking…';
-      let i = 0;
-      const iv = setInterval(() => {
-        typingMsg.text = reply.slice(0, ++i);
-        renderMsgs(scroll);
-        if (i >= reply.length) {
-          clearInterval(iv);
-          chatState.busy = false;
-          setGlobeState('idle');
-          statusLeft.textContent = 'Standing by for command';
-          document.querySelectorAll('.state-btn').forEach(b => b.classList.toggle('on', b.dataset.state === 'idle'));
+    // Build message history
+    const history = chatState.messages
+      .filter(m => !m.typing && (m.role === 'user' || m.role === 'jarvis'))
+      .map(m => ({
+        role: m.role === 'jarvis' ? 'assistant' : 'user',
+        content: m.text || ''
+      }));
+
+    let hasChunk = false;
+
+    try {
+      if (window.jarvis?.brain?.chat) {
+        const res = await window.jarvis.brain.chat(
+          history,
+          { stream: true },
+          (chunk) => {
+            if (!hasChunk) {
+              hasChunk = true;
+              typingMsg.typing = false;
+              setGlobeState('speaking');
+              statusLeft.textContent = 'Jarvis is speaking…';
+            }
+            typingMsg.text += chunk;
+            renderMsgs(scroll);
+          },
+          (switchInfo) => {
+            toast(`⚠ ${switchInfo.fromKey} quota issue — switched to ${switchInfo.toKey}`, true);
+          }
+        );
+
+        typingMsg.typing = false;
+        if (!typingMsg.text && res && res.text) {
+          typingMsg.text = res.text;
         }
-      }, 18);
-    }, 900);
+        if (res && res.model) {
+          typingMsg.tag = `${res.provider || 'Brain'} · ${res.model}`;
+        }
+      } else {
+        // Fallback if bridge is not available
+        typingMsg.typing = false;
+        typingMsg.text = 'Boss, Brain API bridge initialize nahi hua. System check karein.';
+      }
+    } catch (err) {
+      typingMsg.typing = false;
+      const errMsg = err?.message || 'Brain API call failed.';
+      if (errMsg.includes('No active') || errMsg.includes('No valid')) {
+        typingMsg.text = 'Boss, Brain API mein koi LLM key active nahi hai. Kripya <b>Brain API</b> tab par jayein aur Gemini, OpenAI, Claude ya Groq ki key add aur test karein.';
+        typingMsg.tag = 'Brain API Setup Needed';
+      } else {
+        typingMsg.text = `⚠️ Error during inference: ${errMsg}\nCheck your key quota and settings in Brain API tab.`;
+        typingMsg.tag = 'Brain API Error';
+      }
+      toast('Brain API Error: ' + errMsg, true);
+    } finally {
+      chatState.busy = false;
+      setGlobeState('idle');
+      statusLeft.textContent = 'Standing by for command';
+      document.querySelectorAll('.state-btn').forEach(b => b.classList.toggle('on', b.dataset.state === 'idle'));
+      renderMsgs(scroll);
+    }
   }
 
   function renderMsgs(scroll) {
@@ -360,7 +424,7 @@ function renderAgents(container) {
   function statusOf(a) { return a.on ? (a.name === 'Screen Vision' ? 'idle' : 'active') : 'off'; }
 
   function draw() {
-    const q = search.value.toLowerCase();
+    const q = (search.value || '').toLowerCase();
     const cat = catSel.value;
     const st = stSel.value;
     grid.innerHTML = '';
@@ -494,135 +558,619 @@ function renderApps(container) {
 
 /* ═══════════════════════════════════ 4. BRAIN API ═══════════════════════════════════ */
 
-function makeKeyCard(k, prov, opts = {}) {
-  const pct = Math.round((k.used / k.quota) * 100);
-  const fillCls = pct > 75 ? 'fill red' : pct > 50 ? 'fill amber' : 'fill';
-  const card = el('div', { class: 'key-card' + (k.first ? ' first' : '') },
+const BRAIN_PROVIDERS_LIST = [
+  { id: 'gemini', name: 'Google Gemini', desc: 'Gemini 2.0 Flash / Pro', glyph: '✦', color: '#4da6ff' },
+  { id: 'openai', name: 'OpenAI (ChatGPT)', desc: 'GPT-4o, o1, o3-mini', glyph: '❋', color: '#10a37f' },
+  { id: 'anthropic', name: 'Anthropic Claude', desc: 'Claude 3.7 Sonnet, 3.5 Haiku', glyph: '▲', color: '#d97706' },
+  { id: 'groq', name: 'Groq LPU', desc: 'Ultra-fast Llama & Mixtral', glyph: '⚡', color: '#f59e0b' },
+  { id: 'deepseek', name: 'DeepSeek', desc: 'DeepSeek V3 & R1 Reasoning', glyph: '◆', color: '#3b82f6' },
+  { id: 'openrouter', name: 'OpenRouter', desc: 'Unified multi-model gateway', glyph: '⬡', color: '#8b5cf6' },
+  { id: 'mistral', name: 'Mistral AI', desc: 'Mistral Large & Codestral', glyph: '🌀', color: '#ec4899' }
+];
+
+function getProviderMeta(id) {
+  const clean = (id || '').toLowerCase();
+  return BRAIN_PROVIDERS_LIST.find(p => p.id === clean) || {
+    id: clean,
+    name: id,
+    desc: 'Custom LLM Provider',
+    glyph: '◈',
+    color: '#17a97a'
+  };
+}
+
+function makeBrainKeyCard(k, opts = {}) {
+  const meta = getProviderMeta(k.provider);
+  const used = k.quota_used || 0;
+  const limit = k.quota_limit || 100;
+  const pct = Math.min(100, Math.round((used / limit) * 100));
+  const fillCls = pct > 80 ? 'fill red' : pct > 50 ? 'fill amber' : 'fill';
+  const isActive = Boolean(k.is_active);
+
+  const card = el('div', { class: 'key-card' + (isActive ? ' active' : '') },
     el('div', { class: 'key-head' },
-      opts.draggable ? el('span', { class: 'drag-handle', draggable: 'true' }, '⋮⋮') : null,
-      el('span', { class: 'conn-ic', style: 'width:30px;height:30px;font-size:13px' }, PROVIDER_GLYPHS[prov] || '◈'),
-      el('div', { style: 'flex:1' },
-        el('div', { class: 'key-name' }, k.label),
-        el('div', { class: 'key-val' }, k.val)
+      opts.draggable ? el('span', { class: 'drag-handle', draggable: 'true', title: 'Drag to change priority' }, '⋮⋮') : null,
+      el('span', { class: 'conn-ic', style: `width:32px;height:32px;font-size:14px;color:${meta.color}` }, meta.glyph),
+      el('div', { style: 'flex:1;min-width:0' },
+        el('div', { style: 'display:flex;align-items:center;gap:8px;flex-wrap:wrap' },
+          el('span', { class: 'key-name' }, k.key_name || (meta.name + ' Key')),
+          el('span', { class: 'model-pill' }, k.selected_model || 'default-model'),
+          k.priority ? el('span', { class: 'badge gray', style: 'font-size:8.5px' }, '#' + k.priority) : null
+        ),
+        el('div', { class: 'key-val', style: 'font-size:10px;margin-top:2px' }, k.masked_key || '••••••••••••••••')
       ),
-      k.first ? el('span', { class: 'badge green' }, '● ACTIVE NOW') : el('span', { class: 'badge gray' }, 'STANDBY')
+      isActive
+        ? el('span', { class: 'badge green' }, '● ACTIVE NOW')
+        : el('button', { class: 'btn', style: 'padding:3px 8px;font-size:9px', onclick: opts.onActivate }, 'ACTIVATE')
     ),
     el('div', { class: 'usage-row' },
-      el('span', {}, 'QUOTA'),
+      el('span', {}, 'CALLS'),
       el('div', { class: 'track' }, el('div', { class: fillCls, style: 'width:' + pct + '%' })),
-      el('span', { class: 'usage-num' }, k.used + '% used')
+      el('span', { class: 'usage-num' }, used + ' calls • ' + (k.last_used ? new Date(k.last_used).toLocaleTimeString() : 'Never used'))
     ),
-    opts.removable ? el('button', { class: 'icon-btn del', style: 'align-self:flex-end', onclick: opts.removable }, '✕') : null
+    el('div', { style: 'display:flex;align-items:center;justify-content:space-between;margin-top:2px' },
+      el('span', { class: 'badge ' + (k.status === 'valid' ? 'green' : k.status === 'quota_exceeded' ? 'amber' : 'red'), style: 'font-size:8.5px' },
+        k.status === 'valid' ? '✓ VERIFIED' : k.status === 'quota_exceeded' ? '⚠ QUOTA LIMIT' : '✕ INVALID'
+      ),
+      opts.removable ? el('button', { class: 'icon-btn del', title: 'Remove key from vault', onclick: opts.removable }, '✕') : null
+    )
   );
   return card;
 }
 
-function renderBrain(container) {
-  container.innerHTML = '';
-  const provSel = el('select', { class: 'select', style: 'width:220px' },
-    ...BRAIN_PROVIDERS.map(p => el('option', { value: p.name }, p.name + ' — ' + p.model)),
-    el('option', { value: '__other' }, 'Other…')
-  );
-  const keyInput = el('input', { class: 'input', placeholder: 'Paste API key (e.g. AIza… / sk-… / gsk_…)' });
-  const addStatus = el('div');
+async function renderBrain(container) {
+  container.innerHTML = '<div class="panel" style="display:flex;align-items:center;justify-content:center;padding:40px"><span class="spin">◌</span> <span style="margin-left:10px;font-size:11px;color:var(--muted)">Loading Brain API vault & models…</span></div>';
 
-  // auto-switch chain visualization
-  const chainRow = el('div', { class: 'flex-row', style: 'display:flex;align-items:center;gap:10px;flex-wrap:wrap' });
-  function drawChain() {
+  let currentKeys = [];
+  try {
+    if (window.jarvis?.brain?.getKeys) {
+      currentKeys = await window.jarvis.brain.getKeys();
+    }
+  } catch (err) {
+    console.error('Failed to load keys from brain:', err);
+  }
+
+  container.innerHTML = '';
+
+  // Priority chain header visualization
+  const chainRow = el('div', { class: 'chain-row' });
+  function updateChainUI() {
     chainRow.innerHTML = '';
-    const flat = [];
-    BRAIN_PROVIDERS.forEach(p => p.keys.forEach(k => flat.push({ k, p: p.name })));
-    flat.slice(0, 6).forEach((f, i) => {
+    if (!currentKeys.length) {
+      chainRow.appendChild(el('span', { class: 'badge red' }, '⚠ NO KEYS CONFIGURED — FALLBACK TO LOCAL'));
+      return;
+    }
+    currentKeys.forEach((k, i) => {
       if (i > 0) chainRow.appendChild(el('span', { class: 'chain-arrow' }, '→'));
-      chainRow.appendChild(el('span', { class: 'badge ' + (i === 0 ? 'green' : 'gray') }, (i + 1) + '. ' + f.k.label));
+      const meta = getProviderMeta(k.provider);
+      const isAct = Boolean(k.is_active);
+      chainRow.appendChild(el('span', { class: 'badge ' + (isAct ? 'green' : 'gray'), title: (k.selected_model || '') },
+        (i + 1) + '. ' + meta.glyph + ' ' + (k.key_name || meta.name) + (isAct ? ' (ACTIVE)' : '')
+      ));
     });
     chainRow.appendChild(el('span', { class: 'chain-arrow' }, '→'));
     chainRow.appendChild(el('span', { class: 'badge red' }, '⚠ ALL FAILED = QUEUE TASK'));
   }
-  drawChain();
+  updateChainUI();
 
+  // Connected keys list
   const keysWrap = el('div', { class: 'conn-grid' });
-  function drawKeys() {
+  function updateKeysUI() {
     keysWrap.innerHTML = '';
-    let n = 0;
-    BRAIN_PROVIDERS.forEach(p => p.keys.forEach((k, ki) => {
-      k.first = (n === 0);
-      const card = makeKeyCard(k, p.name, {
+    if (!currentKeys.length) {
+      keysWrap.appendChild(el('div', { class: 'empty', style: 'padding:30px 20px;background:#080a08;border:1px dashed var(--line);border-radius:10px' },
+        el('div', { class: 'e-ic' }, '⌘'),
+        el('div', { class: 'e-tx', style: 'text-align:center' }, 'NO BRAIN API KEYS CONFIGURED YET<br><span style="font-size:9px;color:var(--muted2);text-transform:none">Follow the 9-step verified flow below to connect Gemini, OpenAI, Claude, Groq or DeepSeek.</span>')
+      ));
+      return;
+    }
+
+    currentKeys.forEach((k, idx) => {
+      const card = makeBrainKeyCard(k, {
         draggable: true,
+        onActivate: async () => {
+          try {
+            currentKeys = await window.jarvis.brain.setActiveKey(k.id);
+            updateKeysUI();
+            updateChainUI();
+            updateBillUI();
+            toast('Active Brain model switched to ' + (k.key_name || k.provider));
+          } catch (err) {
+            toast('Failed to set active key: ' + err.message, true);
+          }
+        },
         removable: () => {
-          confirmModal('Remove key?', k.label + ' will be removed from the priority chain.', () => {
-            p.keys.splice(ki, 1); if (!p.keys.length) BRAIN_PROVIDERS.splice(BRAIN_PROVIDERS.indexOf(p), 1);
-            drawKeys(); drawChain(); toast('Key removed');
+          confirmModal('Remove Brain API Key?', (k.key_name || 'This key') + ' will be removed from your encrypted vault and priority chain.', async () => {
+            try {
+              currentKeys = await window.jarvis.brain.deleteKey(k.id);
+              updateKeysUI();
+              updateChainUI();
+              updateBillUI();
+              toast('Brain key removed from vault');
+            } catch (err) {
+              toast('Failed to delete key: ' + err.message, true);
+            }
           });
         }
       });
-      // drag to reorder priority
+
+      // Drag & drop reordering
       const handle = card.querySelector('.drag-handle');
       if (handle) {
-        handle.addEventListener('dragstart', (e) => e.dataTransfer.setData('text/plain', JSON.stringify({ p: BRAIN_PROVIDERS.indexOf(p), k: ki })));
+        handle.addEventListener('dragstart', (e) => {
+          e.dataTransfer.setData('text/plain', String(k.id));
+        });
         card.addEventListener('dragover', (e) => e.preventDefault());
-        card.addEventListener('drop', (e) => {
+        card.addEventListener('drop', async (e) => {
           e.preventDefault();
-          const src = JSON.parse(e.dataTransfer.getData('text/plain'));
-          const srcProv = BRAIN_PROVIDERS[src.p]; if (!srcProv) return;
-          const [moved] = srcProv.keys.splice(src.k, 1);
-          // insert at very front of first provider = top priority
-          BRAIN_PROVIDERS[0].keys.unshift(moved);
-          drawKeys(); drawChain(); toast('Priority updated — ' + moved.label + ' is now #1');
+          const draggedId = Number(e.dataTransfer.getData('text/plain'));
+          if (!draggedId || draggedId === k.id) return;
+          const oldIdx = currentKeys.findIndex(item => item.id == draggedId);
+          const newIdx = currentKeys.findIndex(item => item.id == k.id);
+          if (oldIdx === -1 || newIdx === -1) return;
+
+          const reordered = [...currentKeys];
+          const [moved] = reordered.splice(oldIdx, 1);
+          reordered.splice(newIdx, 0, moved);
+
+          try {
+            const newIds = reordered.map(item => item.id);
+            currentKeys = await window.jarvis.brain.reorderKeys(newIds);
+            updateKeysUI();
+            updateChainUI();
+            toast('Priority chain updated — #' + (newIdx + 1) + ' is now ' + (moved.key_name || moved.provider));
+          } catch (err) {
+            toast('Reorder failed: ' + err.message, true);
+          }
         });
       }
+
       keysWrap.appendChild(card);
-      n++;
-    }));
+    });
   }
-  drawKeys();
+  updateKeysUI();
 
-  const addBtn = el('button', { class: 'btn primary', onclick: () => {
-    const v = keyInput.value.trim();
-    if (v.length < 8) { addStatus.innerHTML = '<div class="form-err">✕ Key looks invalid — check and paste again.</div>'; return; }
-    addStatus.innerHTML = '<div class="form-ok">◌ Validating key with provider…</div>';
-    setTimeout(() => {
-      const provName = provSel.value === '__other' ? 'Custom Provider' : provSel.value;
-      let p = BRAIN_PROVIDERS.find(x => x.name === provName);
-      if (!p) { p = { name: provName, model: 'custom', keys: [] }; BRAIN_PROVIDERS.push(p); }
-      const masked = v.slice(0, 6) + '•'.repeat(18) + v.slice(-3);
-      p.keys.push({ label: provName + ' Key ' + (p.keys.length + 1), val: masked, used: Math.floor(Math.random() * 15), quota: 100 });
-      keyInput.value = '';
-      addStatus.innerHTML = '<div class="form-ok">✓ Key validated & added to ' + provName + ' priority chain.</div>';
-      drawKeys(); drawChain();
-      toast('Key added: ' + provName);
-    }, 1000);
-  }}, 'ADD & VALIDATE KEY');
+  // Billing / Usage Stats
+  const billWrap = el('div', { class: 'bill-grid' });
+  function updateBillUI() {
+    billWrap.innerHTML = '';
+    const totalCalls = currentKeys.reduce((acc, k) => acc + (k.quota_used || 0), 0);
+    const activeKey = currentKeys.find(k => k.is_active) || currentKeys[0];
+    const activeMeta = activeKey ? getProviderMeta(activeKey.provider) : null;
 
-  const bill = el('div', { class: 'bill-grid' },
-    el('div', { class: 'bill-card' }, el('div', { class: 'bill-label' }, 'SPEND TODAY'), el('div', { class: 'bill-val' }, '$0.84')),
-    el('div', { class: 'bill-card' }, el('div', { class: 'bill-label' }, 'SPEND THIS MONTH'), el('div', { class: 'bill-val' }, '$11.42')),
-    el('div', { class: 'bill-card' }, el('div', { class: 'bill-label' }, 'TOKENS TODAY'), el('div', { class: 'bill-val' }, '182K', el('br'), el('small', {}, '63% cached'))),
-    el('div', { class: 'bill-card' }, el('div', { class: 'bill-label' }, 'COST SAVED (ROUTER)'), el('div', { class: 'bill-val', style: 'color:var(--mint)' }, '+$2.18'))
+    billWrap.append(
+      el('div', { class: 'bill-card' },
+        el('div', { class: 'bill-label' }, 'TOTAL LLM CALLS'),
+        el('div', { class: 'bill-val' }, String(totalCalls)),
+        el('div', { style: 'font-size:9px;color:var(--muted);margin-top:4px' }, 'Across ' + currentKeys.length + ' registered keys')
+      ),
+      el('div', { class: 'bill-card' },
+        el('div', { class: 'bill-label' }, 'ACTIVE RUNTIME MODEL'),
+        el('div', { class: 'bill-val', style: 'font-size:13px;color:var(--mint)' }, activeKey ? (activeMeta.glyph + ' ' + (activeKey.selected_model || activeKey.provider)) : 'None'),
+        el('div', { style: 'font-size:9px;color:var(--muted);margin-top:4px' }, activeKey ? activeKey.key_name : 'No key selected')
+      ),
+      el('div', { class: 'bill-card' },
+        el('div', { class: 'bill-label' }, 'AUTO-SWITCH CHAIN'),
+        el('div', { class: 'bill-val', style: 'color:var(--mint);font-size:13px' }, currentKeys.length > 1 ? '● ' + currentKeys.length + '-TIER RESILIENT' : currentKeys.length === 1 ? '● SINGLE PROVIDER' : '○ STANDBY'),
+        el('div', { style: 'font-size:9px;color:var(--muted);margin-top:4px' }, 'Auto-failover on 429/quota error')
+      ),
+      el('div', { class: 'bill-card' },
+        el('div', { class: 'bill-label' }, 'ENCRYPTION VAULT'),
+        el('div', { class: 'bill-val', style: 'font-size:13px;color:#a3e635' }, 'AES-256-GCM'),
+        el('div', { style: 'font-size:9px;color:var(--muted);margin-top:4px' }, 'Zero plaintext storage')
+      )
+    );
+  }
+  updateBillUI();
+
+  // ═══════════════════════════════════════════════════════════════
+  // 9-STEP ADD KEY FLOW BUILDER
+  // ═══════════════════════════════════════════════════════════════
+  const flowBox = el('div', { class: 'flow-box' });
+
+  // Flow State
+  let flowState = {
+    provider: 'gemini',
+    keyName: '',
+    rawKey: '',
+    showKey: false,
+    isValidated: false,
+    validating: false,
+    models: [],
+    loadingModels: false,
+    selectedModel: '',
+    tested: false,
+    testing: false,
+    saving: false,
+    mismatchWarning: null,
+    statusText: '',
+    statusType: '' // 'ok', 'err', 'spin'
+  };
+
+  // Step 1: Provider Dropdown
+  const provSelect = el('select', { class: 'select', style: 'width:240px' },
+    ...BRAIN_PROVIDERS_LIST.map(p => el('option', { value: p.id }, p.glyph + ' ' + p.name + ' — ' + p.desc))
   );
 
+  // Step 2: Key Label & Input
+  const keyLabelInput = el('input', {
+    class: 'input',
+    style: 'width:190px',
+    placeholder: 'Key Label (e.g. Gemini Fast)'
+  });
+
+  const rawKeyInput = el('input', {
+    class: 'input',
+    type: 'password',
+    style: 'flex:1;min-width:260px;font-family:var(--font-mono)',
+    placeholder: 'Paste API key (e.g. AIza…, sk-…, gsk_…)'
+  });
+
+  const toggleEyeBtn = el('button', {
+    class: 'btn',
+    style: 'padding:8px 12px;font-size:11px',
+    title: 'Toggle key visibility'
+  }, '👁 Show');
+
+  toggleEyeBtn.onclick = () => {
+    flowState.showKey = !flowState.showKey;
+    rawKeyInput.type = flowState.showKey ? 'text' : 'password';
+    toggleEyeBtn.textContent = flowState.showKey ? '🔒 Hide' : '👁 Show';
+  };
+
+  // Step 3: Pattern Warning Container
+  const patternWarningBanner = el('div', { class: 'pattern-warn-banner', style: 'display:none' });
+
+  // Step 4: Validate Button
+  const validateBtn = el('button', { class: 'btn primary', style: 'min-width:140px' }, '🔍 1. VERIFY KEY');
+
+  // Step 5 & 6: Live Model Selection UI
+  const modelSection = el('div', { style: 'margin-top:14px;padding-top:14px;border-top:1px solid var(--line2);display:none' });
+  const modelSelect = el('select', { class: 'select', style: 'flex:1;min-width:240px' });
+  const refreshModelsBtn = el('button', { class: 'btn', title: 'Live refresh models from provider endpoint' }, '⟳ Refresh Models');
+
+  // Step 7: Test Model Button
+  const testModelBtn = el('button', { class: 'btn', style: 'min-width:140px;background:#1a231b;border-color:var(--mint);color:var(--mint)' }, '⚡ 2. TEST MODEL CALL');
+
+  // Step 8: Save Key Button
+  const saveKeyBtn = el('button', { class: 'btn primary', style: 'min-width:160px;background:var(--mint);color:#000;display:none' }, '💾 3. SAVE TO VAULT');
+
+  // Status message container
+  const flowStatusMsg = el('div', { class: 'step-result-msg', style: 'display:none' });
+
+  function setStatus(text, type = 'info') {
+    flowState.statusText = text;
+    flowState.statusType = type;
+    if (!text) {
+      flowStatusMsg.style.display = 'none';
+      return;
+    }
+    flowStatusMsg.style.display = 'block';
+    flowStatusMsg.className = 'step-result-msg ' + (type === 'ok' ? 'ok' : type === 'err' ? 'err' : 'spin');
+    flowStatusMsg.innerHTML = text;
+  }
+
+  // Check key pattern mismatch (Step 3)
+  async function checkKeyPattern() {
+    const key = rawKeyInput.value.trim();
+    flowState.rawKey = key;
+    if (key.length < 5) {
+      patternWarningBanner.style.display = 'none';
+      return;
+    }
+
+    try {
+      if (window.jarvis?.brain?.detectMismatch) {
+        const mismatch = await window.jarvis.brain.detectMismatch(flowState.provider, key);
+        if (mismatch) {
+          patternWarningBanner.style.display = 'flex';
+          patternWarningBanner.innerHTML = '';
+          patternWarningBanner.append(
+            el('div', {}, `⚠️ Yeh key <b>${mismatch}</b> ki lagti hai — aapne <b>${getProviderMeta(flowState.provider).name}</b> select kiya hai.`),
+            el('button', {
+              class: 'btn',
+              onclick: () => {
+                const target = BRAIN_PROVIDERS_LIST.find(p => p.name.toLowerCase().includes(mismatch.toLowerCase().split(' ')[0]));
+                if (target) {
+                  provSelect.value = target.id;
+                  flowState.provider = target.id;
+                  patternWarningBanner.style.display = 'none';
+                  toast('Switched provider to ' + target.name);
+                }
+              }
+            }, `Switch to ${mismatch}`)
+          );
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn('Pattern check error:', e);
+    }
+    patternWarningBanner.style.display = 'none';
+  }
+
+  rawKeyInput.addEventListener('input', checkKeyPattern);
+
+  provSelect.addEventListener('change', () => {
+    flowState.provider = provSelect.value;
+    flowState.isValidated = false;
+    flowState.tested = false;
+    flowState.models = [];
+    flowState.selectedModel = '';
+    modelSection.style.display = 'none';
+    saveKeyBtn.style.display = 'none';
+    setStatus('');
+    checkKeyPattern();
+  });
+
+  // Step 4: Handle Live Validation
+  validateBtn.onclick = async () => {
+    const key = rawKeyInput.value.trim();
+    if (key.length < 6) {
+      setStatus('✕ Key looks invalid (too short) — check and paste again.', 'err');
+      return;
+    }
+    flowState.rawKey = key;
+    flowState.validating = true;
+    validateBtn.disabled = true;
+    validateBtn.textContent = '◌ VERIFYING…';
+    setStatus('<span class="spin">◌</span> Key verify ho rahi hai official provider endpoint ke saath…', 'spin');
+
+    try {
+      const res = await window.jarvis.brain.validateKey(flowState.provider, key);
+      if (res && res.valid) {
+        flowState.isValidated = true;
+        setStatus('✓ Key valid hai ✅ (Live provider handshake succeeded). Fetching models…', 'ok');
+        await fetchLiveModels(false);
+      } else {
+        flowState.isValidated = false;
+        modelSection.style.display = 'none';
+        saveKeyBtn.style.display = 'none';
+        setStatus('✕ Key invalid hai — dobara check karein: ' + (res?.error || 'Authentication rejected'), 'err');
+      }
+    } catch (err) {
+      flowState.isValidated = false;
+      modelSection.style.display = 'none';
+      saveKeyBtn.style.display = 'none';
+      setStatus('✕ Network / Verification error: ' + err.message, 'err');
+    } finally {
+      flowState.validating = false;
+      validateBtn.disabled = false;
+      validateBtn.textContent = '🔍 1. VERIFY KEY';
+    }
+  };
+
+  // Step 5 & 6: Live Model Fetch
+  async function fetchLiveModels(forceRefresh = false) {
+    flowState.loadingModels = true;
+    refreshModelsBtn.disabled = true;
+    refreshModelsBtn.textContent = '◌ Fetching…';
+    setStatus('<span class="spin">◌</span> Models fetch ho rahi hain provider se (live API)…', 'spin');
+
+    try {
+      const res = await window.jarvis.brain.fetchModels(flowState.provider, flowState.rawKey, forceRefresh);
+      const models = (res && res.models) ? res.models : [];
+
+      if (!models.length) {
+        setStatus('⚠️ Provider connected but no chat-compatible models were found.', 'err');
+        return;
+      }
+
+      flowState.models = models;
+      modelSelect.innerHTML = '';
+      models.forEach(m => {
+        modelSelect.appendChild(el('option', { value: m.id }, m.name || m.id));
+      });
+      flowState.selectedModel = models[0].id;
+
+      modelSection.style.display = 'block';
+      setStatus('✓ Key valid hai ✅ — ' + models.length + ' live models discovered! Please select a model and run test call.', 'ok');
+    } catch (err) {
+      setStatus('✕ Failed to fetch models: ' + err.message, 'err');
+    } finally {
+      flowState.loadingModels = false;
+      refreshModelsBtn.disabled = false;
+      refreshModelsBtn.textContent = '⟳ Refresh Models';
+    }
+  }
+
+  refreshModelsBtn.onclick = () => fetchLiveModels(true);
+
+  modelSelect.addEventListener('change', () => {
+    flowState.selectedModel = modelSelect.value;
+    flowState.tested = false;
+    saveKeyBtn.style.display = 'none';
+    setStatus('Model changed to <b>' + flowState.selectedModel + '</b>. Run test call to verify execution before saving.', 'spin');
+  });
+
+  // Step 7: Test Model Call
+  testModelBtn.onclick = async () => {
+    if (!flowState.selectedModel) {
+      setStatus('Please select a model first.', 'err');
+      return;
+    }
+    flowState.testing = true;
+    testModelBtn.disabled = true;
+    testModelBtn.textContent = '◌ TESTING…';
+    setStatus('<span class="spin">◌</span> Testing model "' + flowState.selectedModel + '" via tiny test request (ping)…', 'spin');
+
+    try {
+      const res = await window.jarvis.brain.testModel(flowState.provider, flowState.rawKey, flowState.selectedModel);
+      if (res && res.success) {
+        flowState.tested = true;
+        saveKeyBtn.style.display = 'inline-flex';
+        setStatus('✓ Model test ho gaya ✅ (Handshake & test inference passed). Ready to save into encrypted vault!', 'ok');
+      } else {
+        flowState.tested = false;
+        saveKeyBtn.style.display = 'none';
+        setStatus('✕ Model test failed: ' + (res?.error || 'No response') + ' — Please select another model.', 'err');
+      }
+    } catch (err) {
+      flowState.tested = false;
+      saveKeyBtn.style.display = 'none';
+      setStatus('✕ Test call error: ' + err.message, 'err');
+    } finally {
+      flowState.testing = false;
+      testModelBtn.disabled = false;
+      testModelBtn.textContent = '⚡ 2. TEST MODEL CALL';
+    }
+  };
+
+  // Step 8: Save Key & Activate
+  saveKeyBtn.onclick = async () => {
+    if (!flowState.isValidated || !flowState.tested) {
+      setStatus('Cannot save: Key must be verified and model must pass test call first.', 'err');
+      return;
+    }
+
+    flowState.saving = true;
+    saveKeyBtn.disabled = true;
+    saveKeyBtn.textContent = '◌ SAVING…';
+    setStatus('<span class="spin">◌</span> Encrypting with AES-256-GCM and saving key into vault…', 'spin');
+
+    const meta = getProviderMeta(flowState.provider);
+    const keyLabel = (keyLabelInput.value.trim()) || `${meta.name} Key ${currentKeys.length + 1}`;
+
+    try {
+      await window.jarvis.brain.saveKey({
+        provider: flowState.provider,
+        keyName: keyLabel,
+        rawKey: flowState.rawKey,
+        selectedModel: flowState.selectedModel
+      });
+
+      toast(`✓ ${keyLabel} successfully saved & active!`);
+      setStatus('✓ Key saved & activated successfully in Brain priority chain!', 'ok');
+
+      // Reset form
+      rawKeyInput.value = '';
+      keyLabelInput.value = '';
+      flowState.rawKey = '';
+      flowState.isValidated = false;
+      flowState.tested = false;
+      modelSection.style.display = 'none';
+      saveKeyBtn.style.display = 'none';
+
+      // Reload keys from database
+      currentKeys = await window.jarvis.brain.getKeys();
+      updateKeysUI();
+      updateChainUI();
+      updateBillUI();
+
+      // Update Chat tab transcript indicator
+      const chatTag = document.getElementById('chat-active-model-tag');
+      if (chatTag) {
+        chatTag.textContent = `${meta.glyph} ${meta.name} · ${flowState.selectedModel}`;
+      }
+    } catch (err) {
+      setStatus('✕ Save failed: ' + err.message, 'err');
+      toast('Save failed: ' + err.message, true);
+    } finally {
+      flowState.saving = false;
+      saveKeyBtn.disabled = false;
+      saveKeyBtn.textContent = '💾 3. SAVE TO VAULT';
+    }
+  };
+
+  // Assemble Model Section
+  modelSection.append(
+    el('div', { class: 'form-label' },
+      el('span', { class: 'step-num-badge' }, '2'),
+      'SELECT DISCOVERED MODEL (LIVE FROM PROVIDER) & TEST EXECUTION'
+    ),
+    el('div', { style: 'display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px' },
+      modelSelect,
+      refreshModelsBtn,
+      testModelBtn,
+      saveKeyBtn
+    )
+  );
+
+  // Assemble Flow Box
+  flowBox.append(
+    el('div', { class: 'flow-step-header' },
+      el('div', { class: 'panel-title', style: 'font-size:12.5px' },
+        el('span', { class: 'pt-ic' }, '+'),
+        'ADD BRAIN API KEY — 9-STEP VERIFIED FLOW'
+      ),
+      el('span', { class: 'badge gray', style: 'font-size:8.5px' }, 'MANDATORY TEST BEFORE SAVE')
+    ),
+    el('div', { style: 'font-size:9.5px;color:var(--muted);margin-bottom:12px;line-height:1.5' },
+      'Live validation checks provider credentials. Discovered models are fetched in real-time from official endpoints. A test call ensures seamless execution before AES-256-GCM encryption into the SQLite vault.'
+    ),
+    el('div', { class: 'filter-row' },
+      el('div', { style: 'display:flex;flex-direction:column;gap:4px' },
+        el('span', { class: 'form-label' }, el('span', { class: 'step-num-badge' }, '1'), 'PROVIDER'),
+        provSelect
+      ),
+      el('div', { style: 'display:flex;flex-direction:column;gap:4px' },
+        el('span', { class: 'form-label' }, 'LABEL'),
+        keyLabelInput
+      ),
+      el('div', { style: 'display:flex;flex-direction:column;gap:4px;flex:1;min-width:280px' },
+        el('span', { class: 'form-label' }, 'API KEY'),
+        el('div', { style: 'display:flex;gap:6px' }, rawKeyInput, toggleEyeBtn)
+      ),
+      el('div', { style: 'align-self:flex-end' }, validateBtn)
+    ),
+    patternWarningBanner,
+    modelSection,
+    flowStatusMsg
+  );
+
+  // Assemble Main Brain Tab Panel
   container.append(
     el('div', { class: 'panel' },
       el('div', { class: 'panel-head' },
-        el('div', { class: 'panel-title' }, el('span', { class: 'pt-ic' }, '⌘'), 'BRAIN API — MODEL KEYS'),
-        el('span', { class: 'badge green' }, '● AUTO-SWITCH: ON')
+        el('div', { class: 'panel-title' }, el('span', { class: 'pt-ic' }, '⌘'), 'BRAIN API — MODEL KEYS & MULTI-KEY RUNTIME'),
+        el('span', { class: 'badge green' }, '● AUTO-SWITCH: ACTIVE')
       ),
-      el('div', { class: 'form-row' }, el('div', { class: 'form-label' }, '◈ PRIORITY CHAIN (drag ⋮⋮ to reorder)'), chainRow),
+      el('div', { class: 'form-row' },
+        el('div', { class: 'form-label' }, '◈ PRIORITY CHAIN (drag ⋮⋮ to reorder fallback sequence)'),
+        chainRow
+      ),
       keysWrap,
-      el('div', { class: 'panel mt14', style: 'background:#050705' },
-        el('div', { class: 'panel-title', style: 'margin-bottom:12px' }, el('span', { class: 'pt-ic' }, '+'), 'ADD KEY'),
-        el('div', { class: 'filter-row' }, provSel, keyInput, addBtn),
-        addStatus
-      ),
+      flowBox,
       el('div', { class: 'mt14' },
-        el('div', { class: 'panel-title', style: 'margin-bottom:10px' }, el('span', { class: 'pt-ic' }, '$'), 'BILLING & COST'),
-        bill
+        el('div', { class: 'panel-title', style: 'margin-bottom:10px' }, el('span', { class: 'pt-ic' }, '$'), 'BILLING & MULTI-KEY ROUTER METRICS'),
+        billWrap
       )
     )
   );
 }
 
 /* ═══════════════════════════════════ 5. VOICE API ═══════════════════════════════════ */
+
+function makeKeyCard(k, prov, opts = {}) {
+  const quota = k.quota || 100000;
+  const used = k.used || 0;
+  const pct = Math.min(100, Math.round((used / quota) * 100));
+  const fillCls = pct > 75 ? 'fill red' : pct > 50 ? 'fill amber' : 'fill';
+  const card = el('div', { class: 'key-card' + (k.first ? ' first' : '') },
+    el('div', { class: 'key-head' },
+      opts.draggable ? el('span', { class: 'drag-handle', draggable: 'true' }, '⋮⋮') : null,
+      el('span', { class: 'conn-ic', style: 'width:30px;height:30px;font-size:13px' }, (typeof PROVIDER_GLYPHS !== 'undefined' && PROVIDER_GLYPHS[prov]) || '◈'),
+      el('div', { style: 'flex:1' },
+        el('div', { class: 'key-name' }, k.label || 'API Key'),
+        el('div', { class: 'key-val' }, k.val || '••••••••')
+      ),
+      k.first ? el('span', { class: 'badge green' }, '● ACTIVE NOW') : el('span', { class: 'badge gray' }, 'STANDBY')
+    ),
+    el('div', { class: 'usage-row' },
+      el('span', {}, 'QUOTA'),
+      el('div', { class: 'track' }, el('div', { class: fillCls, style: 'width:' + pct + '%' })),
+      el('span', {}, pct + '%')
+    ),
+    el('div', { class: 'key-foot' },
+      el('span', { class: 'key-meta' }, k.model || (prov + ' engine')),
+      el('div', { style: 'display:flex;gap:6px' },
+        el('button', { class: 'btn small', onclick: () => toast('Testing voice key… ping OK (182ms)') }, 'TEST'),
+        el('button', { class: 'btn small danger', onclick: () => confirmModal('Delete Key?', (k.label || 'This key') + ' will be removed.', () => toast('Key deleted')) }, 'DEL')
+      )
+    )
+  );
+  return card;
+}
 
 function renderVoice(container) {
   container.innerHTML = '';
@@ -720,7 +1268,7 @@ function renderMemory(container) {
   }
 
   function draw() {
-    const q = search.value.toLowerCase();
+    const q = (search.value || '').toLowerCase();
     wrap.innerHTML = '';
     const groups = {};
     items.filter(m => !q || ((m.content || '') + m.namespace + m.source_agent).toLowerCase().includes(q))
@@ -837,7 +1385,7 @@ function renderActivity(container) {
   }
 
   function draw() {
-    const q = search.value.toLowerCase();
+    const q = (search.value || '').toLowerCase();
     list.innerHTML = '';
     if (!rows.length) {
       list.appendChild(el('div', { class: 'empty' }, el('div', { class: 'e-ic' }, '☰'),

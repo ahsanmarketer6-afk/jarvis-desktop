@@ -8,6 +8,7 @@ const { app, BrowserWindow, ipcMain, shell } = require('electron');
 const path = require('path');
 const { autoUpdater } = require('electron-updater');
 const db = require('./src/main/database');
+const { brainManager } = require('./src/main/brain');
 
 let mainWindow = null;
 
@@ -98,6 +99,35 @@ ipcMain.handle('crud:insert', (_e, table, obj) => db.insert(table, obj));
 ipcMain.handle('crud:list', (_e, table, opts) => db.list(table, opts || {}));
 ipcMain.handle('crud:update', (_e, table, id, obj) => db.update(table, id, obj));
 ipcMain.handle('crud:delete', (_e, table, id) => db.remove(table, id));
+
+// ─── IPC: Brain API Runtime (The Single LLM Path) ──────────────────
+ipcMain.handle('brain:getProviders', () => brainManager.getProviders());
+ipcMain.handle('brain:detectMismatch', (_e, provider, key) => brainManager.detectMismatch(provider, key));
+ipcMain.handle('brain:validateKey', (_e, provider, key) => brainManager.validateKey(provider, key));
+ipcMain.handle('brain:fetchModels', (_e, provider, key, forceRefresh) => brainManager.fetchModels(provider, key, forceRefresh));
+ipcMain.handle('brain:testModel', (_e, provider, key, model) => brainManager.testModel(provider, key, model));
+ipcMain.handle('brain:saveKey', (_e, payload) => brainManager.saveKey(payload));
+ipcMain.handle('brain:getKeys', () => brainManager.getKeys());
+ipcMain.handle('brain:reorderKeys', (_e, ids) => brainManager.reorderKeys(ids));
+ipcMain.handle('brain:deleteKey', (_e, id) => brainManager.deleteKey(id));
+ipcMain.handle('brain:setActiveKey', (_e, id) => brainManager.setActiveKey(id));
+ipcMain.handle('brain:getActiveConfig', () => brainManager.getActiveConfig());
+
+ipcMain.handle('brain:chat', async (event, { messages, options, requestId }) => {
+  const onChunk = (chunk) => {
+    if (requestId && event.sender && !event.sender.isDestroyed()) {
+      event.sender.send(`brain:chat:chunk:${requestId}`, chunk);
+    }
+  };
+
+  const onKeySwitch = (info) => {
+    if (requestId && event.sender && !event.sender.isDestroyed()) {
+      event.sender.send(`brain:chat:switch:${requestId}`, info);
+    }
+  };
+
+  return await brainManager.chat(messages, options || {}, onChunk, onKeySwitch);
+});
 
 // ─── Window lifecycle ───────────────────────────────────────────────
 function createWindow() {

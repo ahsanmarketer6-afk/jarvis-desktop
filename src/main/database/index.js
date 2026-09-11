@@ -148,6 +148,116 @@ function deleteMemory(id) {
   return true;
 }
 
+/* ─── API Keys repository (Brain system) ────────────────────────── */
+
+function maskKey(plain) {
+  if (!plain || typeof plain !== 'string') return '••••••••';
+  if (plain.length <= 8) return '••••••••';
+  const prefix = plain.slice(0, 4);
+  const suffix = plain.slice(-4);
+  return `${prefix}${'•'.repeat(Math.min(16, plain.length - 8))}${suffix}`;
+}
+
+function insertApiKey({ provider, keyName, rawKey, selectedModel, priority = 100, isActive = 1, status = 'valid' }) {
+  const enc = vault.encrypt(rawKey);
+  const keyHash = vault.hash(rawKey);
+
+  // Check if hash exists
+  const existing = db.prepare('SELECT id FROM api_keys WHERE key_hash = ?').get(keyHash);
+  if (existing) {
+    db.prepare(`UPDATE api_keys SET
+      provider = ?,
+      key_name = ?,
+      encrypted_key = ?,
+      selected_model = ?,
+      priority = ?,
+      is_active = ?,
+      status = ?,
+      updated_at = datetime('now')
+      WHERE id = ?`).run(provider, keyName, enc, selectedModel, priority, isActive ? 1 : 0, status, existing.id);
+    return existing.id;
+  }
+
+  const info = db.prepare(`INSERT INTO api_keys
+    (provider, key_name, encrypted_key, key_hash, selected_model, is_active, priority, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      provider, keyName, enc, keyHash, selectedModel, isActive ? 1 : 0, priority, status
+    );
+  return info.lastInsertRowid;
+}
+
+function listApiKeys() {
+  const rows = db.prepare('SELECT * FROM api_keys ORDER BY priority ASC, id ASC').all();
+  return rows.map(r => {
+    let masked = '••••••••';
+    try {
+      const dec = vault.decrypt(r.encrypted_key);
+      masked = maskKey(dec);
+    } catch (e) {
+      masked = '••••••••';
+    }
+    return {
+      id: r.id,
+      provider: r.provider,
+      key_name: r.key_name,
+      masked_key: masked,
+      selected_model: r.selected_model,
+      is_active: r.is_active,
+      priority: r.priority,
+      quota_used: r.quota_used,
+      quota_limit: r.quota_limit,
+      last_used: r.last_used,
+      status: r.status,
+      created_at: r.created_at,
+      updated_at: r.updated_at
+    };
+  });
+}
+
+function getDecryptedApiKey(id) {
+  const row = db.prepare('SELECT * FROM api_keys WHERE id = ?').get(id);
+  if (!row) return null;
+  const raw = vault.decrypt(row.encrypted_key);
+  return { ...row, raw_key: raw };
+}
+
+function getActiveApiKeys() {
+  const rows = db.prepare("SELECT * FROM api_keys WHERE status != 'invalid' ORDER BY priority ASC, id ASC").all();
+  return rows.map(r => {
+    try {
+      const raw = vault.decrypt(r.encrypted_key);
+      return { ...r, raw_key: raw };
+    } catch (e) {
+      return null;
+    }
+  }).filter(Boolean);
+}
+
+function updateApiKey(id, patch) {
+  const allowed = ['key_name', 'selected_model', 'is_active', 'priority', 'status', 'quota_used', 'quota_limit', 'last_used'];
+  const keys = Object.keys(patch).filter(k => allowed.includes(k));
+  if (!keys.length) return false;
+  const sets = keys.map(k => `${k} = ?`).join(', ');
+  db.prepare(`UPDATE api_keys SET ${sets}, updated_at = datetime('now') WHERE id = ?`)
+    .run(...keys.map(k => patch[k]), id);
+  return true;
+}
+
+function deleteApiKey(id) {
+  db.prepare('DELETE FROM api_keys WHERE id = ?').run(id);
+  return true;
+}
+
+function reorderApiKeys(ids) {
+  const tx = db.transaction(() => {
+    ids.forEach((id, idx) => {
+      db.prepare("UPDATE api_keys SET priority = ?, updated_at = datetime('now') WHERE id = ?").run(idx + 1, id);
+    });
+  });
+  tx();
+  return true;
+}
+
 /* generic CRUD used by workflows / notifications now, others later */
 function insert(table, obj) {
   const allowed = ['workflows', 'notifications'];
@@ -204,5 +314,6 @@ module.exports = {
   logActivity, getActivity,
   getSetting, setSetting, getAllSettings,
   addMemory, getMemory, updateMemory, deleteMemory,
+  insertApiKey, listApiKeys, getDecryptedApiKey, getActiveApiKeys, updateApiKey, deleteApiKey, reorderApiKeys,
   insert, list, update, remove
 };

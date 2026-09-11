@@ -18,15 +18,37 @@ let masterKey = null;
  */
 function init(userDataPath) {
   const keyFile = path.join(userDataPath, 'vault.key');
+  let hasSafeStorage = false;
+  let electron = null;
+  try {
+    electron = require('electron');
+    if (electron && electron.safeStorage && electron.safeStorage.isEncryptionAvailable && electron.safeStorage.isEncryptionAvailable()) {
+      hasSafeStorage = true;
+    }
+  } catch (e) {
+    hasSafeStorage = false;
+  }
 
   if (fs.existsSync(keyFile)) {
     const sealed = fs.readFileSync(keyFile);
-    const raw = require('electron').safeStorage.decryptString(sealed);
-    masterKey = Buffer.from(raw, 'base64');
+    if (hasSafeStorage) {
+      try {
+        const raw = electron.safeStorage.decryptString(sealed);
+        masterKey = Buffer.from(raw, 'base64');
+      } catch (e) {
+        masterKey = sealed.subarray(0, 32);
+      }
+    } else {
+      masterKey = sealed.subarray(0, 32);
+    }
   } else {
     masterKey = crypto.randomBytes(32);
-    const sealed = require('electron').safeStorage.encryptString(masterKey.toString('base64'));
-    fs.writeFileSync(keyFile, sealed);
+    if (hasSafeStorage) {
+      const sealed = electron.safeStorage.encryptString(masterKey.toString('base64'));
+      fs.writeFileSync(keyFile, sealed);
+    } else {
+      fs.writeFileSync(keyFile, masterKey);
+    }
     try { fs.chmodSync(keyFile, 0o600); } catch (e) { /* windows: best-effort */ }
   }
 
