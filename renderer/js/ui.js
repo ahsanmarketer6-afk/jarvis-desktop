@@ -740,6 +740,11 @@ function renderChat(container) {
     }
   }, '🎙');
 
+  const versionTag = el('span', {}, 'v1.2.1 — CLOUD VOICE ACTIVE');
+  if (window.jarvis?.app?.getVersion) {
+    window.jarvis.app.getVersion().then(v => { versionTag.textContent = 'v' + v + ' — CLOUD VOICE ACTIVE'; });
+  }
+
   const right = el('div', { class: 'transcript-col' },
     el('div', { class: 'transcript-card' },
       el('div', { class: 'transcript-head' },
@@ -747,7 +752,7 @@ function renderChat(container) {
         activeModelTag),
       scroll,
       el('div', { class: 'composer' }, input, composerMicBtn, sendBtn),
-      el('div', { class: 'status-line' }, statusLeft, el('span', {}, 'v1.2.0 — CLOUD VOICE ACTIVE'))
+      el('div', { class: 'status-line' }, statusLeft, versionTag)
     )
   );
 

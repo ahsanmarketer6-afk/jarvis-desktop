@@ -47,24 +47,23 @@ jobs:
           NODE_ENV: production
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Inspect Build Artifacts
+        shell: bash
+        run: |
+          echo "=== Generated Dist Files ==="
+          ls -la dist/
+
       - name: Publish Live GitHub Release
         uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
         with:
           tag_name: ${{ env.TAG }}
           name: JARVIS ${{ env.TAG }}
-          body: |
-            ## 🚀 JARVIS Desktop Release ${{ env.TAG }}
-            
-            ### ✨ What's New:
-            - **Phase 3 Cloud Voice API System**: Realtime Speech-to-Text (STT) and Text-to-Speech (TTS) via Google AI (Gemini), ElevenLabs, OpenAI, and Groq Cloud.
-            - **9-Step Verified Voice Key Flow**: Live endpoint verification, dynamic voice/model discovery, and mandatory audio playback testing.
-            - **Voice Conversation Loop**: Realtime voice capture, cloud transcription, streamed LLM responses, and voice synthesis with instant stop/interrupt support.
-            - **Auto-Updater & SQLite Vault**: Secure AES-256-GCM encryption with seamless desktop auto-updating.
-            
-            ### 📦 Download & Install:
-            - Download `JARVIS-Setup-${{ env.VERSION }}.exe` below and run the installer.
+          target_commitish: ${{ github.sha }}
           draft: false
           prerelease: false
+          make_latest: true
+          overwrite: true
           generate_release_notes: true
           files: |
             dist/*.exe
