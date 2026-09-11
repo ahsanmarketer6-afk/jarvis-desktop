@@ -1,61 +1,25 @@
 /* ══════════════════════════════════════════════════════════════════
-   JARVIS OS — App bootstrap: boot screen, nav, sidebar, clock
+   JARVIS OS — App bootstrap v2: nav, clock, window controls, boot
+   Each tab renders its own full screen (no shared sidebar).
    ══════════════════════════════════════════════════════════════════ */
 
 const TABS = [
-  { id: 'chat',        label: 'CHAT',        ic: '▤', side: null },
-  { id: 'agents',      label: 'AGENTS',      ic: '▣', side: 'registry' },
-  { id: 'apps',        label: 'APPS',        ic: '⇄', side: 'services' },
-  { id: 'brain',       label: 'BRAIN API',   ic: '⌘', side: 'keys' },
-  { id: 'voice',       label: 'VOICE API',   ic: '♪', side: 'tts' },
-  { id: 'memory',      label: 'MEMORY',      ic: '▦', side: 'bank' },
-  { id: 'activity',    label: 'ACTIVITY',    ic: '☰', side: 'log' },
-  { id: 'reports',     label: 'REPORTS',     ic: '❐', side: 'alerts' },
-  { id: 'automations', label: 'AUTOMATIONS', ic: '⚡', side: 'flows' },
-  { id: 'settings',    label: 'SETTINGS',    ic: '⚙', side: 'prefs' }
+  { id: 'chat',        label: 'Chat',          ic: '▤', count: null },
+  { id: 'agents',      label: 'Agents',        ic: '▣', count: '31' },
+  { id: 'apps',        label: 'Third-Party Apps', ic: '⇄', count: null },
+  { id: 'brain',       label: 'Brain API',     ic: '⌘', count: 'Ph 2' },
+  { id: 'voice',       label: 'Voice API',     ic: '♪', count: 'Ph 4' },
+  { id: 'memory',      label: 'Memory',        ic: '▦', count: null },
+  { id: 'activity',    label: 'Activity Log',  ic: '☰', count: null },
+  { id: 'reports',     label: 'Reports',       ic: '❐', count: null },
+  { id: 'automations', label: 'Automations',   ic: '⚡', count: null },
+  { id: 'settings',    label: 'Settings',      ic: '⚙', count: null }
 ];
 
-const SIDE_PANELS = {
-  registry: { head: 'AGENT REGISTRY', items: [
-    ['▣', 'ALL AGENTS', 'agents'], ['◉', 'CORE (8)', 'agents'], ['▣', 'SYSTEM (4)', 'agents'],
-    ['✆', 'COMMUNICATION (3)', 'agents'], ['⇄', 'INTEGRATION (1)', 'agents'],
-    ['❐', 'PRODUCTIVITY (6)', 'agents'], ['◉', 'INTERACTION (1)', 'agents'],
-    ['♥', 'SUPPORT (1)', 'agents'], ['✦', 'EXTENDED (7)', 'agents']
-  ]},
-  services: { head: 'CONNECTED SERVICES', items: [
-    ['⇄', 'ALL SERVICES', 'apps'], ['✆', 'WHATSAPP', 'apps'], ['✉', 'GMAIL', 'apps'],
-    ['◷', 'CALENDAR', 'apps'], ['◈', 'GITHUB', 'apps'], ['+', 'CONNECT NEW', 'apps']
-  ]},
-  keys: { head: 'BRAIN API', items: [
-    ['⌘', 'PRIORITY CHAIN', 'brain'], ['✦', 'GEMINI KEYS', 'brain'], ['❋', 'OPENAI KEYS', 'brain'],
-    ['✳', 'ANTHROPIC KEYS', 'brain'], ['⚡', 'GROQ KEYS', 'brain'], ['$', 'BILLING', 'brain']
-  ]},
-  tts: { head: 'VOICE API', items: [
-    ['♪', 'TTS KEYS', 'voice'], ['♫', 'VOICE LIBRARY', 'voice'], ['◍', 'EDGE FALLBACK', 'voice']
-  ]},
-  bank: { head: 'MEMORY BANK', items: [
-    ['▦', 'ALL MEMORIES', 'memory'], ['◉', 'PERSONAL', 'memory'], ['▤', 'WORKSPACE', 'memory'],
-    ['❐', 'NEWS', 'memory'], ['⚙', 'PREFERENCES', 'memory'], ['☎', 'CONTACTS', 'memory']
-  ]},
-  log: { head: 'ACTIVITY LOG', items: [
-    ['☰', 'ALL EVENTS', 'activity'], ['✓', 'SUCCESS ONLY', 'activity'], ['✕', 'FAILURES', 'activity'],
-    ['◷', 'TODAY', 'activity'], ['⭳', 'EXPORT', 'activity']
-  ]},
-  alerts: { head: 'REPORTS', items: [
-    ['❐', 'INBOX', 'reports'], ['●', 'UNREAD', 'reports'], ['▤', 'DAILY SUMMARY', 'reports'],
-    ['▦', 'WEEKLY SUMMARY', 'reports'], ['⚠', 'CRITICAL', 'reports']
-  ]},
-  flows: { head: 'AUTOMATIONS', items: [
-    ['⚡', 'ALL WORKFLOWS', 'automations'], ['◷', 'SCHEDULED', 'automations'],
-    ['✋', 'MANUAL', 'automations'], ['+', 'NEW WORKFLOW', 'automations']
-  ]},
-  prefs: { head: 'SETTINGS', items: [
-    ['⚙', 'GENERAL', 'settings'], ['⛨', 'SECURITY', 'settings'], ['⛁', 'BACKUP', 'settings'], ['↻', 'UPDATES', 'settings']
-  ]},
-  none: { head: 'JARVIS SYSTEM', items: [
-    ['◉', 'MASTER ORCHESTRATOR', 'agents'], ['▦', 'MEMORY BANK', 'memory'],
-    ['☰', 'ACTIVITY LOG', 'activity'], ['❐', 'REPORTS', 'reports']
-  ]}
+const RENDERERS = {
+  chat: renderChat, agents: renderAgents, apps: renderApps, brain: renderBrain,
+  voice: renderVoice, memory: renderMemory, activity: renderActivity,
+  reports: renderReports, automations: renderAutomations, settings: renderSettings
 };
 
 let activeTab = 'chat';
@@ -66,20 +30,8 @@ function switchTab(id) {
   const sec = document.getElementById('tab-' + id);
   if (sec) sec.classList.add('active');
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === id));
-  const tab = TABS.find(t => t.id === id);
-  document.getElementById('side-title').textContent = SIDE_PANELS[tab.side || 'none'].head;
-  const list = document.getElementById('side-list');
-  list.innerHTML = '';
-  SIDE_PANELS[tab.side || 'none'].items.forEach(([ic, label, target]) => {
-    list.appendChild(el('button', { class: 'side-item' + (target === id ? ' on' : ''), onclick: () => switchTab(target) },
-      el('span', { class: 'si-ic' }, ic), label));
-  });
-  const renderers = {
-    chat: renderChat, agents: renderAgents, apps: renderApps, brain: renderBrain,
-    voice: renderVoice, memory: renderMemory, activity: renderActivity,
-    reports: renderReports, automations: renderAutomations, settings: renderSettings
-  };
-  renderers[id](sec);
+  if (id !== 'chat' && window.NeuralGlobe) window.NeuralGlobe.stop();
+  RENDERERS[id](sec);
 }
 
 function startClock() {
@@ -91,11 +43,27 @@ function startClock() {
 }
 
 function bootNav() {
-  const nav = document.getElementById('topnav');
+  const nav = document.getElementById('tabnav');
   TABS.forEach(t => {
     nav.appendChild(el('button', { class: 'nav-btn', 'data-tab': t.id, onclick: () => switchTab(t.id) },
-      el('span', { class: 'si-ic' }, t.ic), t.label));
+      el('span', {}, t.ic), t.label,
+      t.count ? el('span', { class: 'nav-count' }, t.count) : null
+    ));
   });
+}
+
+function bootWindowControls() {
+  const jar = window.jarvis;
+  document.getElementById('win-min').onclick = () => jar ? jar.window.minimize() : null;
+  document.getElementById('win-max').onclick = () => jar ? jar.window.maximize() : null;
+  document.getElementById('win-close').onclick = () => jar ? jar.window.close() : null;
+}
+
+async function bootVersionPill() {
+  const pill = document.getElementById('ver-pill');
+  if (window.jarvis) {
+    try { pill.textContent = 'v' + await window.jarvis.app.getVersion(); } catch (e) { /* keep default */ }
+  }
 }
 
 /* ─── Boot sequence ────────────────────────────────────────────── */
@@ -108,9 +76,18 @@ const BOOT_STEPS = [
   'AGENTS ONLINE.'
 ];
 
+function enterApp() {
+  document.getElementById('boot-screen').classList.add('hidden');
+  document.getElementById('app').classList.remove('hidden');
+  startClock();
+  bootWindowControls();
+  bootVersionPill();
+  bootNav();
+  switchTab('chat');
+}
+
 function runBoot() {
   const screen = document.getElementById('boot-screen');
-  const appEl = document.getElementById('app');
   const fill = document.getElementById('boot-fill');
   const pct = document.getElementById('boot-pct');
   const ft = document.getElementById('boot-frame-text');
@@ -123,26 +100,10 @@ function runBoot() {
     pct.textContent = Math.floor(p) + '%';
     const target = Math.min(BOOT_STEPS.length - 1, Math.floor(p / 18));
     if (target !== step) { step = target; ft.textContent = BOOT_STEPS[step]; }
-    if (p >= 100) {
-      clearInterval(iv);
-      setTimeout(() => {
-        screen.classList.add('hidden');
-        appEl.classList.remove('hidden');
-        startClock();
-        bootNav();
-        switchTab('chat');
-      }, 450);
-    }
+    if (p >= 100) { clearInterval(iv); setTimeout(enterApp, 450); }
   }, 320);
 
-  document.getElementById('boot-override').onclick = () => {
-    clearInterval(iv);
-    screen.classList.add('hidden');
-    appEl.classList.remove('hidden');
-    startClock();
-    bootNav();
-    switchTab('chat');
-  };
+  document.getElementById('boot-override').onclick = () => { clearInterval(iv); enterApp(); };
 }
 
 document.addEventListener('DOMContentLoaded', runBoot);

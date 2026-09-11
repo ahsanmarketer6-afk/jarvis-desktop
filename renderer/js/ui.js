@@ -43,9 +43,9 @@ function openModal({ title, sub, body, actions }) {
 }
 function closeModal() { document.getElementById('modal-root').innerHTML = ''; }
 
-/* ═══════════════════════════════════ 1. CHAT ═══════════════════════════════════ */
+/* ═══════════════════════════════════ 1. CHAT — 3-column HUD ═══════════════════════════════════ */
 
-let chatState = { listening: false, busy: false, messages: [] };
+let chatState = { busy: false, messages: [], state: 'idle', micOn: false };
 
 function detectLang(text) {
   const arabic = /[\u0600-\u06FF]/;
@@ -57,35 +57,99 @@ function detectLang(text) {
 
 function renderChat(container) {
   chatState.messages = chatState.messages.length ? chatState.messages : CHAT_SEED.map(m => ({ ...m }));
-  container.classList.add('chat-wrap');
+  container.classList.add('chat-full');
   container.innerHTML = '';
-  const scroll = el('div', { class: 'chat-scroll' });
-  const composer = el('div', { class: 'composer' });
-  const input = el('input', { class: 'input', placeholder: 'Type a command, Boss… (English / Urdu mix chalega)' });
+  container.style.padding = '14px';
 
-  const wave = el('div', { class: 'wave' });
-  for (let i = 0; i < 8; i++) wave.appendChild(el('i'));
+  /* ── LEFT: system telemetry ── */
+  const lat = el('span', { class: 'metric-val', style: 'margin:5px 0 7px;font-size:15px' }, '42 ms');
+  const latBar = el('div', { class: 'metric-fill', style: 'width:35%' });
+  const pkt = el('span', { class: 'metric-val', style: 'margin:5px 0 7px;font-size:15px' }, '2.65 MB/s');
+  const pktBar = el('div', { class: 'metric-fill blue', style: 'width:55%' });
+  const cpuVal = el('span', { style: 'float:right;color:#ccd2cd' }, '31.3%');
+  const cpuBar = el('div', { class: 'metric-fill', style: 'width:31%' });
+  const ramVal = el('span', { style: 'float:right;color:#ccd2cd' }, '74.7%');
+  const ramBar = el('div', { class: 'metric-fill blue', style: 'width:75%' });
 
-  const mic = el('button', {
-    class: 'mic-btn', title: 'Voice input',
-    onclick: () => {
-      chatState.listening = !chatState.listening;
-      mic.classList.toggle('listening', chatState.listening);
-      wave.classList.toggle('active', chatState.listening);
-      if (chatState.listening) {
-        setTimeout(() => {
-          if (chatState.listening) {
-            input.value = 'Jarvis, kal ki meeting ka agla din check karo';
-            mic.classList.remove('listening'); wave.classList.remove('active');
-            chatState.listening = false;
-            input.dispatchEvent(new Event('keydown'));
-          }
-        }, 2600);
-      }
-    }
-  }, '🎙');
+  const left = el('div', { class: 'hud-col' },
+    el('div', { class: 'hud-card' },
+      el('div', { class: 'hud-title' }, el('span', {}, el('span', { class: 'ht-ic' }, '⌁'), 'SYSTEM TELEMETRY'), el('span', { class: 'hud-tag' }, 'LIVE UPLINK')),
+      el('div', { class: 'hud-card', style: 'background:#0d0f0d;margin-bottom:10px' },
+        el('div', { class: 'hud-title', style: 'margin-bottom:10px' }, el('span', {}, el('span', { class: 'ht-ic' }, '((•))'), 'NETWORK TELEMETRY'), el('span', { class: 'hud-tag gray' }, 'SECURE')),
+        el('div', { class: 'metric-grid' },
+          el('div', { class: 'metric-box' }, el('div', { class: 'metric-label' }, 'PING LATENCY'), lat, el('div', { class: 'metric-track' }, latBar)),
+          el('div', { class: 'metric-box' }, el('div', { class: 'metric-label' }, 'PACKET RATE'), pkt, el('div', { class: 'metric-track' }, pktBar))
+        ),
+        el('div', { class: 'metric-foot' }, el('span', {}, 'ROUTING MESH'), el('span', {}, 'GLOBAL // SECURE'))
+      ),
+      el('div', { class: 'hud-card', style: 'background:#0d0f0d;margin-bottom:10px' },
+        el('div', { class: 'hud-title' }, el('span', {}, el('span', { class: 'ht-ic' }, '◉'), 'CORE METRICS'), el('span', { class: 'hud-tag gray' }, 'NOMINAL')),
+        el('div', { style: 'margin-bottom:12px' }, el('div', { class: 'metric-label' }, 'CPU LOAD ', cpuVal), el('div', { class: 'metric-track mt8' }, cpuBar)),
+        el('div', {}, el('div', { class: 'metric-label' }, 'RAM USAGE ', ramVal), el('div', { class: 'metric-track mt8' }, ramBar))
+      ),
+      el('div', { class: 'subsys-row' },
+        el('div', { class: 'subsys-ic' }, '⌇'),
+        el('div', {},
+          el('div', { class: 'subsys-name' }, 'NEURAL SUBSTRATE'),
+          el('div', { class: 'subsys-sub' }, 'Phase 1 Standby Skeleton • Nominal'))
+      )
+    )
+  );
 
-  const send = el('button', { class: 'btn primary', onclick: () => doSend() }, 'SEND ➤');
+  /* live telemetry jitter */
+  setInterval(() => {
+    if (!document.body.contains(lat)) return;
+    const cpu = 22 + Math.round(Math.random() * 22);
+    const ram = 68 + Math.round(Math.random() * 12);
+    cpuVal.textContent = cpu + '.0%'; cpuBar.style.width = cpu + '%';
+    ramVal.textContent = ram + '.0%'; ramBar.style.width = ram + '%';
+    lat.textContent = (38 + Math.round(Math.random() * 12)) + ' ms';
+    latBar.style.width = (28 + Math.round(Math.random() * 20)) + '%';
+  }, 2600);
+
+  /* ── CENTER: globe + state bar + call controls ── */
+  const stateChip = el('b', {}, 'IDLE');
+  const globeStage = el('div', { class: 'globe-stage' });
+  const center = el('div', { class: 'globe-center' },
+    el('div', { class: 'globe-top-row' },
+      el('span', { class: 'hud-tag' }, '◉ NEURAL HARMONIC CORE'),
+      el('span', { class: 'state-chip' }, 'STATE: ', stateChip)
+    ),
+    globeStage,
+    el('div', { class: 'state-bar' },
+      ...[
+        ['idle', '◉', 'Idle'], ['listening', '((•))', 'Listening'],
+        ['thinking', '⌘', 'Thinking'], ['speaking', '≈', 'Speaking']
+      ].map(([id, ic, label]) =>
+        el('button', { class: 'state-btn' + (id === 'idle' ? ' on' : ''), 'data-state': id,
+          onclick: (e) => {
+            setGlobeState(id);
+            document.querySelectorAll('.state-btn').forEach(b => b.classList.toggle('on', b.dataset.state === id));
+          } }, el('span', {}, ic), label))
+    ),
+    el('div', { class: 'call-bar' },
+      el('button', { class: 'call-btn', title: 'Video call (mock)' }, '▣'),
+      el('button', { class: 'call-btn mic-on', id: 'mic-master', title: 'Toggle microphone', onclick: (e) => {
+        chatState.micOn = !chatState.micOn;
+        e.currentTarget.classList.toggle('mic-on', chatState.micOn);
+        setGlobeState(chatState.micOn ? 'listening' : 'idle');
+        document.querySelectorAll('.state-btn').forEach(b => b.classList.toggle('on', b.dataset.state === (chatState.micOn ? 'listening' : 'idle')));
+      } }, '🎙'),
+      el('button', { class: 'call-btn', title: 'Mute (mock)' }, '◎')
+    )
+  );
+
+  function setGlobeState(s) {
+    chatState.state = s;
+    stateChip.textContent = s.toUpperCase();
+    if (window.NeuralGlobe) window.NeuralGlobe.setState(s);
+  }
+
+  /* ── RIGHT: transcript + composer ── */
+  const scroll = el('div', { class: 'transcript-scroll' });
+  const input = el('input', { class: 'input', placeholder: 'Enter command or message…' });
+  const statusLeft = el('span', {}, 'Standing by for command');
+  const sendBtn = el('button', { class: 'send-btn', onclick: doSend, title: 'Send' }, '➤');
 
   function doSend() {
     const text = input.value.trim();
@@ -93,21 +157,48 @@ function renderChat(container) {
     input.value = '';
     pushMsg({ role: 'user', text });
   }
-
   input.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSend(); });
 
-  composer.append(mic, input, send);
-  container.append(scroll, buildEmoBar(), composer);
+  const right = el('div', { class: 'transcript-col' },
+    el('div', { class: 'transcript-card' },
+      el('div', { class: 'transcript-head' },
+        el('span', {}, '◉ TRANSCRIPT'),
+        el('span', { class: 'hud-tag gray' }, 'Gemini (gemini-2.0-flash)')),
+      scroll,
+      el('div', { class: 'composer' }, input, el('button', { class: 'call-btn', style: 'width:38px;height:38px;font-size:14px', title: 'Voice input', onclick: () => {
+        if (chatState.micOn) return;
+        chatState.micOn = true;
+        document.getElementById('mic-master').classList.add('mic-on');
+        setGlobeState('listening');
+        document.querySelectorAll('.state-btn').forEach(b => b.classList.toggle('on', b.dataset.state === 'listening'));
+        setTimeout(() => {
+          input.value = 'Jarvis, kal ki meeting ka follow-up check karo';
+          chatState.micOn = false;
+          const mm = document.getElementById('mic-master'); if (mm) mm.classList.remove('mic-on');
+          setGlobeState('idle');
+          document.querySelectorAll('.state-btn').forEach(b => b.classList.toggle('on', b.dataset.state === 'idle'));
+          doSend();
+        }, 2400);
+      } }, '🎙'), sendBtn),
+      el('div', { class: 'status-line' }, statusLeft, el('span', {}, 'v1.0.1'))
+    )
+  );
+
+  container.append(el('div', { class: 'chat-layout' }, left, center, right));
+  if (window.NeuralGlobe) window.NeuralGlobe.mount(globeStage);
   renderMsgs(scroll);
 
   function pushMsg(m) {
     chatState.messages.push(m);
     renderMsgs(scroll);
-    if (m.role === 'user') jarvisRespond(scroll);
+    if (m.role === 'user') jarvisRespond();
   }
 
-  function jarvisRespond(scroll) {
+  function jarvisRespond() {
     chatState.busy = true;
+    setGlobeState('thinking');
+    document.querySelectorAll('.state-btn').forEach(b => b.classList.toggle('on', b.dataset.state === 'thinking'));
+    statusLeft.textContent = 'Jarvis is thinking…';
     const typingMsg = { role: 'jarvis', typing: true };
     chatState.messages.push(typingMsg);
     renderMsgs(scroll);
@@ -116,8 +207,10 @@ function renderChat(container) {
       typingMsg.typing = false;
       const reply = JARVIS_REPLIES[Math.floor(Math.random() * JARVIS_REPLIES.length)];
       typingMsg.text = '';
+      typingMsg.tag = 'Brain API Engine';
       typingMsg.emo = ['helpful', 'focused', 'witty', 'analytical'][Math.floor(Math.random() * 4)];
-      // stream-style typing
+      setGlobeState('speaking');
+      statusLeft.textContent = 'Jarvis is speaking…';
       let i = 0;
       const iv = setInterval(() => {
         typingMsg.text = reply.slice(0, ++i);
@@ -125,6 +218,9 @@ function renderChat(container) {
         if (i >= reply.length) {
           clearInterval(iv);
           chatState.busy = false;
+          setGlobeState('idle');
+          statusLeft.textContent = 'Standing by for command';
+          document.querySelectorAll('.state-btn').forEach(b => b.classList.toggle('on', b.dataset.state === 'idle'));
         }
       }, 18);
     }, 900);
@@ -135,11 +231,20 @@ function renderChat(container) {
     chatState.messages.forEach((m, idx) => {
       const isTyping = m.typing;
       const isLast = idx === chatState.messages.length - 1;
-      const meta = el('div', { class: 'meta' });
-      if (m.role === 'jarvis' && !isTyping) {
-        meta.append(
-          el('span', { class: 'emo' }, '♦ ' + (m.emo || 'neutral').toUpperCase()),
-          isLast && chatState.busy ? el('button', { class: 'stop-btn', onclick: () => { chatState.busy = false; toast('Jarvis interrupted'); } }, '■ INTERRUPT') : null
+      const metaRow = el('div', { class: 'meta' });
+      if (m.role === 'jarvis') {
+        metaRow.append(
+          el('span', { class: 'm-sender' }, '◈ JARVIS AI'),
+          el('span', {}, '• ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })),
+          m.tag ? el('span', { class: 'm-tag' }, m.tag) : null,
+          !isTyping && m.emo ? el('span', { class: 'm-tag' }, (m.emo || 'neutral') + ' • 5.4k tok') : null,
+          isTyping ? el('span', { class: 'm-tag' }, 'streaming…') : null
+        );
+      } else {
+        metaRow.append(
+          el('span', { class: 'm-sender', style: 'color:var(--muted)' }, 'OPERATOR'),
+          el('span', {}, '• ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })),
+          el('span', { class: 'm-tag' }, detectLang(m.text || '') === 'ur' ? 'اردو auto-detect' : 'EN')
         );
       }
       const bubble = el('div', { class: 'bubble' },
@@ -147,29 +252,9 @@ function renderChat(container) {
           ? el('span', { class: 'typing' }, el('span'), el('span'), el('span'))
           : (m.text || '')
       );
-      const msg = el('div', { class: 'msg ' + m.role },
-        bubble,
-        el('div', { class: 'meta' },
-          m.role === 'user'
-            ? el('span', { class: 'lang-badge ' + (detectLang(m.text || '') === 'ur' ? 'ur' : '') }, detectLang(m.text || '') === 'ur' ? 'اردو DETECTED' : 'EN')
-            : el('span', {}, 'JARVIS • ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))
-        ),
-        m.role === 'jarvis' ? meta : null
-      );
-      scroll.appendChild(msg);
+      scroll.appendChild(el('div', { class: 'msg ' + m.role }, metaRow, bubble));
     });
     scroll.scrollTop = scroll.scrollHeight;
-  }
-
-  function buildEmoBar() {
-    const bar = el('div', { class: 'mic-wrap' });
-    bar.append(
-      wave,
-      el('span', { class: 'lang-badge ur' }, 'اردو / EN AUTO'),
-      el('span', { class: 'emo' }, '♦ BOSS TONE: CALM'),
-      el('span', { class: 'badge green' }, '● MIC READY')
-    );
-    return bar;
   }
 }
 
@@ -835,34 +920,51 @@ function renderSettings(container) {
 
   const updStatus = el('div', { class: 'upd-status' }, '◌ Ready. Version check karne ke liye button dabayein.');
   const updBar = el('div', { class: 'track upd-bar hidden' }, el('div', { class: 'fill', style: 'width:0%' }));
-  const checkBtn = el('button', { class: 'btn primary', onclick: () => {
+  const checkBtn = el('button', { class: 'btn primary' }, '⟳ CHECK FOR UPDATES');
+  const dlBtn = el('button', { class: 'btn primary hidden' }, '⭳ DOWNLOAD UPDATE');
+  const instBtn = el('button', { class: 'btn primary hidden' }, '↻ RESTART TO INSTALL UPDATE');
+
+  checkBtn.onclick = () => {
     updStatus.innerHTML = '◌ Checking GitHub Releases for updates…';
+    updBar.classList.add('hidden');
+    dlBtn.classList.add('hidden');
+    instBtn.classList.add('hidden');
     if (window.jarvis) window.jarvis.updater.check();
-  }}, '⟳ CHECK FOR UPDATES');
-  const dlBtn = el('button', { class: 'btn primary hidden', onclick: () => { if (window.jarvis) window.jarvis.updater.download(); } }, '⭳ DOWNLOAD UPDATE');
-  const instBtn = el('button', { class: 'btn primary hidden', onclick: () => { if (window.jarvis) window.jarvis.updater.install(); } }, '↻ RESTART TO INSTALL UPDATE');
+    else updStatus.innerHTML = '<span class="st-err">✕ Updater bridge unavailable (dev mode).</span>';
+  };
+  dlBtn.onclick = () => {
+    updStatus.innerHTML = '◌ Starting download…';
+    if (window.jarvis) window.jarvis.updater.download();
+  };
+  instBtn.onclick = () => { if (window.jarvis) window.jarvis.updater.install(); };
 
   if (window.jarvis) {
     window.jarvis.updater.onStatus((s) => {
-      updBar.classList.remove('hidden');
       const fill = updBar.querySelector('.fill');
-      if (s.event === 'checking') updStatus.innerHTML = '◌ Checking GitHub Releases for updates…';
-      else if (s.event === 'available') {
-        updStatus.innerHTML = '<span class="st-ok">✓ Update available: v' + s.version + '</span> — download ready.';
-        dlBtn.classList.remove('hidden'); checkBtn.classList.add('hidden');
-      } else if (s.event === 'not-available') updStatus.innerHTML = '<span class="st-ok">✓ You are on the latest version (v' + s.version + ').</span>';
-      else if (s.event === 'downloading') {
-        dlBtn.classList.add('hidden');
+      if (s.event === 'checking') {
+        updStatus.innerHTML = '◌ Checking GitHub Releases for updates…';
+      } else if (s.event === 'available') {
+        updStatus.innerHTML = '<span class="st-ok">✓ Update available: v' + s.version + '</span> — download shuru karein.';
+        dlBtn.classList.remove('hidden');
+        instBtn.classList.add('hidden');
+      } else if (s.event === 'not-available') {
+        updStatus.innerHTML = '<span class="st-ok">✓ You are on the latest version (v' + s.version + ').</span>';
+        dlBtn.classList.add('hidden'); instBtn.classList.add('hidden');
+      } else if (s.event === 'downloading') {
+        updBar.classList.remove('hidden');
+        dlBtn.classList.add('hidden'); instBtn.classList.add('hidden');
         updStatus.innerHTML = '⭳ Downloading… <b style="color:var(--mint)">' + s.percent + '%</b> — ' + s.transferredMB + ' / ' + s.totalMB + ' MB @ ' + s.bytesPerSecond + ' KB/s';
         fill.style.width = s.percent + '%';
       } else if (s.event === 'downloaded') {
+        updBar.classList.remove('hidden');
+        fill.style.width = '100%';
         updStatus.innerHTML = '<span class="st-ok">✓ Update v' + s.version + ' downloaded.</span> Ready to install.';
         instBtn.classList.remove('hidden');
+        dlBtn.classList.add('hidden');
       } else if (s.event === 'error') {
-        updStatus.innerHTML = '<span class="st-err">✕ ' + s.message + '</span><br />Check internet / GitHub reachability, phir dobara try karein.';
+        updStatus.innerHTML = '<span class="st-err">✕ ' + (s.message || 'Update check failed') + '</span><br />Internet / GitHub reachable check karein, phir dobara try karein.';
+        dlBtn.classList.add('hidden'); instBtn.classList.add('hidden');
       }
-      checkBtn.classList.remove('hidden');
-      if (s.event !== 'available' && s.event !== 'downloaded') { checkBtn.classList.remove('hidden'); }
     });
   }
 
