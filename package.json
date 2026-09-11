@@ -1,23 +1,36 @@
 {
   "name": "jarvis-desktop",
   "productName": "JARVIS",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "JARVIS - Agentic AI operating layer for your laptop",
   "main": "main.js",
   "author": {
-    "name": "JARVIS Owner",
-    "email": "jarvis@localhost"
+    "name": "Ahsan",
+    "email": "ahsanmarketer6@gmail.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ahsanmarketer6-afk/jarvis-desktop.git"
   },
   "license": "MIT",
   "scripts": {
     "dev": "node server.js",
     "start": "node server.js",
-    "build": "node -e \"console.log('Build complete')\""
+    "build": "node -e \"console.log('Build complete')\"",
+    "electron": "electron .",
+    "postinstall": "node scripts/rebuild-native.js",
+    "dist": "electron-builder --win nsis",
+    "publish": "electron-builder --win nsis --publish always"
   },
   "dependencies": {
+    "better-sqlite3": "11.10.0",
+    "electron-updater": "^6.3.9",
     "express": "^5.2.1"
   },
-  "devDependencies": {},
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
   "build": {
     "appId": "com.jarvis.desktop",
     "productName": "JARVIS",
@@ -41,7 +54,9 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "renderer/assets/icon.ico"

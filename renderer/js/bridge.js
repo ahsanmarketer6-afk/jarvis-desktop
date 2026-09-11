@@ -100,7 +100,7 @@
     },
 
     app: {
-      getVersion: async () => '1.1.0'
+      getVersion: async () => '1.1.1'
     },
 
     shell: {
