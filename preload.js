@@ -95,7 +95,7 @@ contextBridge.exposeInMainWorld('jarvis', {
     getExistingGeminiKey: () => ipcRenderer.invoke('voice:getExistingGeminiKey'),
     validateKey: (provider, key, customEndpoint) => ipcRenderer.invoke('voice:validateKey', provider, key, customEndpoint),
     fetchVoices: (provider, key, customEndpoint, forceRefresh) => ipcRenderer.invoke('voice:fetchVoices', provider, key, customEndpoint, forceRefresh),
-    fetchModels: (provider, key, customEndpoint, forceRefresh) => ipcRenderer.invoke('voice:fetchModels', provider, key, customEndpoint, forceRefresh),
+    fetchModels: (provider, key, customEndpoint, forceRefresh, category) => ipcRenderer.invoke('voice:fetchModels', provider, key, customEndpoint, forceRefresh, category),
     testVoice: (provider, key, voice, model, customEndpoint) => ipcRenderer.invoke('voice:testVoice', provider, key, voice, model, customEndpoint),
     saveKey: (payload) => ipcRenderer.invoke('voice:saveKey', payload),
     getKeys: () => ipcRenderer.invoke('voice:getKeys'),
@@ -104,6 +104,42 @@ contextBridge.exposeInMainWorld('jarvis', {
     setActiveKey: (id) => ipcRenderer.invoke('voice:setActiveKey', id),
     getActiveConfig: () => ipcRenderer.invoke('voice:getActiveConfig'),
     synthesize: (text, options) => ipcRenderer.invoke('voice:synthesize', text, options),
-    transcribe: (audioData, options) => ipcRenderer.invoke('voice:transcribe', audioData, options)
+    transcribe: (audioData, options) => ipcRenderer.invoke('voice:transcribe', audioData, options),
+    live: {
+      start: (options) => ipcRenderer.invoke('voice:live:start', options),
+      sendAudio: (pcmChunk) => ipcRenderer.invoke('voice:live:sendAudio', pcmChunk),
+      stop: () => ipcRenderer.invoke('voice:live:stop'),
+      getStatus: () => ipcRenderer.invoke('voice:live:getStatus'),
+      onAudio: (cb) => {
+        const listener = (_e, data) => cb(data);
+        ipcRenderer.on('voice:live:audio', listener);
+        return () => ipcRenderer.removeListener('voice:live:audio', listener);
+      },
+      onText: (cb) => {
+        const listener = (_e, data) => cb(data);
+        ipcRenderer.on('voice:live:text', listener);
+        return () => ipcRenderer.removeListener('voice:live:text', listener);
+      },
+      onInterrupted: (cb) => {
+        const listener = () => cb();
+        ipcRenderer.on('voice:live:interrupted', listener);
+        return () => ipcRenderer.removeListener('voice:live:interrupted', listener);
+      },
+      onTurnComplete: (cb) => {
+        const listener = () => cb();
+        ipcRenderer.on('voice:live:turnComplete', listener);
+        return () => ipcRenderer.removeListener('voice:live:turnComplete', listener);
+      },
+      onError: (cb) => {
+        const listener = (_e, data) => cb(data);
+        ipcRenderer.on('voice:live:error', listener);
+        return () => ipcRenderer.removeListener('voice:live:error', listener);
+      },
+      onStatus: (cb) => {
+        const listener = (_e, data) => cb(data);
+        ipcRenderer.on('voice:live:status', listener);
+        return () => ipcRenderer.removeListener('voice:live:status', listener);
+      }
+    }
   }
 });

@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 const { getVoiceAdapter, VOICE_PROVIDERS, detectVoiceKeyMismatch } = require('./adapters');
+const liveSessionManager = require('./live');
 const db = require('../database');
 
 // 24-hour cache for voices and models lists: key = provider + '_' + keyHash, val = { data, timestamp }
@@ -13,6 +14,7 @@ class VoiceManager {
   constructor() {
     this.cachedActiveTtsConfig = null;
     this.cachedActiveSttConfig = null;
+    this.liveSession = liveSessionManager;
   }
 
   getProviders() {
@@ -103,14 +105,14 @@ class VoiceManager {
     }
   }
 
-  async fetchModels(provider, key, customEndpoint = null, forceRefresh = false) {
+  async fetchModels(provider, key, customEndpoint = null, forceRefresh = false, category = 'all') {
     const adapter = getVoiceAdapter(provider);
     if (!adapter) {
       throw new Error(`Unknown voice provider: "${provider}"`);
     }
 
-    const keyHash = crypto.createHash('sha256').update(String(key) + (customEndpoint || '')).digest('hex').slice(0, 16);
-    const cacheKey = `${provider}_models_${keyHash}`;
+    const keyHash = crypto.createHash('sha256').update(String(key) + (customEndpoint || '') + '_' + category).digest('hex').slice(0, 16);
+    const cacheKey = `${provider}_models_${category}_${keyHash}`;
 
     if (!forceRefresh && modelsCache.has(cacheKey)) {
       const cached = modelsCache.get(cacheKey);
@@ -120,11 +122,11 @@ class VoiceManager {
     }
 
     try {
-      const models = await adapter.fetchModels(key, { customEndpoint });
+      const models = await adapter.fetchModels(key, { customEndpoint, category });
       modelsCache.set(cacheKey, { data: models, timestamp: Date.now() });
       db.logActivity(
         'Voice API',
-        `Live models fetched for ${adapter.name} (${models.length} models)`,
+        `Live models fetched for ${adapter.name} (${models.length} ${category} models)`,
         null,
         'success'
       );
@@ -239,6 +241,7 @@ class VoiceManager {
       const adapter = getVoiceAdapter(k.provider);
       return adapter && adapter.capabilities.stt;
     });
+    const liveKey = keys.find(k => k.provider === 'gemini') || db.getActiveApiKeys().find(k => k.provider === 'gemini');
 
     return {
       tts: ttsKey ? {
@@ -255,8 +258,56 @@ class VoiceManager {
         keyName: sttKey.key_name,
         model: ttsKey?.selected_model || sttKey.selected_model,
         customEndpoint: sttKey.custom_endpoint
-      } : null
+      } : null,
+      live: liveKey ? {
+        available: true,
+        keyName: liveKey.key_name,
+        hasGeminiKey: true
+      } : { available: false, hasGeminiKey: false }
     };
+  }
+
+  /**
+   * Starts a Gemini Live API WebSocket session.
+   */
+  async startLiveSession({ model, voice = 'Puck', systemInstruction = null, windowSender = null }) {
+    // Look for active Gemini key in Voice keys or Brain keys
+    const voiceKeys = db.getActiveVoiceKeys();
+    const geminiVoiceKey = voiceKeys.find(k => k.provider === 'gemini');
+    let rawKey = geminiVoiceKey ? geminiVoiceKey.raw_key : null;
+
+    if (!rawKey) {
+      const brainKeys = db.getActiveApiKeys();
+      const geminiBrainKey = brainKeys.find(k => k.provider === 'gemini');
+      rawKey = geminiBrainKey ? geminiBrainKey.raw_key : null;
+    }
+
+    if (!rawKey) {
+      throw new Error('No active Google AI (Gemini) key found. Please add a Gemini key in the Voice API or Brain tab to use Live Mode.');
+    }
+
+    const useModel = model || geminiVoiceKey?.selected_model || 'gemini-2.0-flash-exp';
+    const useVoice = voice || geminiVoiceKey?.selected_voice || 'Puck';
+
+    return await this.liveSession.startSession({
+      apiKey: rawKey,
+      model: useModel,
+      voice: useVoice,
+      systemInstruction,
+      windowSender
+    });
+  }
+
+  sendLiveAudio(base64Pcm16) {
+    return this.liveSession.sendAudioChunk(base64Pcm16);
+  }
+
+  async stopLiveSession() {
+    return await this.liveSession.stopSession();
+  }
+
+  getLiveStatus() {
+    return this.liveSession.getStatus();
   }
 
   /**

@@ -144,10 +144,65 @@ function renderChat(container) {
   const stateChip = el('b', {}, 'IDLE');
   const globeStage = el('div', { class: 'globe-stage' });
 
-  // Voice playback audio tracking & interrupt
+  // ─── AUDIO ENGINE: Direct 16kHz PCM WAV Recorder & Web Audio Player ───
   let currentAudioPlayer = null;
   let activeMediaRecorder = null;
   let audioChunks = [];
+  let audioContext = null;
+  let scriptProcessor = null;
+  let pcmBuffers = [];
+  let pcmLength = 0;
+  let liveActive = false;
+  let liveAudioCtx = null;
+  let liveNextPlayTime = 0;
+  let activeLiveSources = [];
+
+  // Helper: Converts Float32Array PCM samples to 16-bit PCM RIFF/WAVE ArrayBuffer
+  function encodeWAV(samples, sampleRate = 16000) {
+    const buffer = new ArrayBuffer(44 + samples.length * 2);
+    const view = new DataView(buffer);
+
+    // RIFF identifier
+    view.setUint32(0, 0x52494646, false); // 'RIFF'
+    view.setUint32(4, 36 + samples.length * 2, true); // file length - 8
+    view.setUint32(8, 0x57415645, false); // 'WAVE'
+    // fmt subchunk
+    view.setUint32(12, 0x666d7420, false); // 'fmt '
+    view.setUint32(16, 16, true); // Subchunk1Size (16 for PCM)
+    view.setUint16(20, 1, true); // AudioFormat (1 for PCM)
+    view.setUint16(22, 1, true); // NumChannels (1 mono)
+    view.setUint32(24, sampleRate, true); // SampleRate
+    view.setUint32(28, sampleRate * 2, true); // ByteRate (SampleRate * 1 channel * 2 bytes)
+    view.setUint16(32, 2, true); // BlockAlign (1 * 2)
+    view.setUint16(34, 16, true); // BitsPerSample (16 bits)
+    // data subchunk
+    view.setUint32(36, 0x64617461, false); // 'data'
+    view.setUint32(40, samples.length * 2, true); // data length
+
+    // Write 16-bit PCM samples
+    let offset = 44;
+    for (let i = 0; i < samples.length; i++, offset += 2) {
+      let s = Math.max(-1, Math.min(1, samples[i]));
+      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+    }
+    return buffer;
+  }
+
+  // Helper: Float32Array to 16-bit PCM Base64 string (for Live API streaming)
+  function floatToPcm16Base64(float32Array) {
+    const int16Array = new Int16Array(float32Array.length);
+    for (let i = 0; i < float32Array.length; i++) {
+      let s = Math.max(-1, Math.min(1, float32Array[i]));
+      int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    }
+    const bytes = new Uint8Array(int16Array.buffer);
+    let binary = '';
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+  }
 
   function stopSpeaking() {
     if (currentAudioPlayer) {
@@ -157,6 +212,12 @@ function renderChat(container) {
       } catch (e) {}
       currentAudioPlayer = null;
     }
+    if (activeLiveSources && activeLiveSources.length) {
+      activeLiveSources.forEach(src => {
+        try { src.stop(); } catch (e) {}
+      });
+      activeLiveSources = [];
+    }
     if ('speechSynthesis' in window) {
       try { window.speechSynthesis.cancel(); } catch (e) {}
     }
@@ -165,6 +226,105 @@ function renderChat(container) {
       statusLeft.textContent = 'Speech interrupted';
     }
     interruptBtn.style.display = 'none';
+  }
+
+  // Play Live 24kHz PCM chunks through Web Audio API
+  function playLivePcmChunk(base64Data, mimeType = 'audio/pcm;rate=24000') {
+    try {
+      if (!liveAudioCtx || liveAudioCtx.state === 'closed') {
+        liveAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+      }
+      if (liveAudioCtx.state === 'suspended') {
+        liveAudioCtx.resume();
+      }
+
+      const binaryStr = atob(base64Data);
+      const len = binaryStr.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) bytes[i] = binaryStr.charCodeAt(i);
+
+      const int16Array = new Int16Array(bytes.buffer);
+      const float32Array = new Float32Array(int16Array.length);
+      for (let i = 0; i < int16Array.length; i++) {
+        float32Array[i] = int16Array[i] / 32768.0;
+      }
+
+      const sampleRateMatch = mimeType.match(/rate=(\d+)/i);
+      const rate = sampleRateMatch ? parseInt(sampleRateMatch[1], 10) : 24000;
+
+      const audioBuffer = liveAudioCtx.createBuffer(1, float32Array.length, rate);
+      audioBuffer.copyToChannel(float32Array, 0);
+
+      const source = liveAudioCtx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(liveAudioCtx.destination);
+
+      const now = liveAudioCtx.currentTime;
+      if (liveNextPlayTime < now) liveNextPlayTime = now;
+
+      source.start(liveNextPlayTime);
+      liveNextPlayTime += audioBuffer.duration;
+
+      activeLiveSources.push(source);
+      source.onended = () => {
+        const idx = activeLiveSources.indexOf(source);
+        if (idx !== -1) activeLiveSources.splice(idx, 1);
+        if (activeLiveSources.length === 0 && chatState.state === 'speaking') {
+          applyState('idle');
+          statusLeft.textContent = 'Live voice active — bolo Boss';
+        }
+      };
+
+      applyState('speaking');
+      statusLeft.textContent = 'Jarvis is speaking (Gemini Live Dialog)…';
+      interruptBtn.style.display = 'inline-block';
+    } catch (err) {
+      console.warn('[Live Audio Player] Error playing PCM chunk:', err);
+    }
+  }
+
+  // Setup Live API event listeners if supported
+  if (window.jarvis?.voice?.live) {
+    window.jarvis.voice.live.onAudio((data) => {
+      if (data && data.data) {
+        playLivePcmChunk(data.data, data.mimeType);
+      }
+    });
+
+    window.jarvis.voice.live.onText((data) => {
+      if (data && data.text) {
+        // Append or stream text to transcript
+        const lastMsg = chatState.messages[chatState.messages.length - 1];
+        if (lastMsg && lastMsg.role === 'jarvis' && lastMsg._live) {
+          lastMsg.text += data.text;
+        } else {
+          chatState.messages.push({ role: 'jarvis', text: data.text, _live: true });
+        }
+        renderMsgs(scroll);
+      }
+    });
+
+    window.jarvis.voice.live.onInterrupted(() => {
+      console.log('[Live Mode] User interrupted model speech -> clearing audio queue');
+      stopSpeaking();
+      statusLeft.textContent = 'Listening to you… (interrupted)';
+      applyState('listening');
+    });
+
+    window.jarvis.voice.live.onTurnComplete(() => {
+      console.log('[Live Mode] Turn complete');
+      if (activeLiveSources.length === 0) {
+        applyState('idle');
+        statusLeft.textContent = 'Live voice active — bolo Boss';
+      }
+    });
+
+    window.jarvis.voice.live.onError((data) => {
+      console.error('[Live Mode] Error:', data);
+      toast('Live Mode Error: ' + (data.error || 'Connection failure'), true);
+      statusLeft.textContent = 'Live Mode error: ' + (data.error || 'Connection lost');
+      stopLiveMode();
+    });
   }
 
   // Interrupt button
@@ -178,9 +338,124 @@ function renderChat(container) {
     }
   }, '■ Stop Voice');
 
-  // Mic capture functions
-  async function startRecording() {
+  // Voice Mode selector (Standard vs Live API)
+  let voiceMode = 'standard'; // 'standard' | 'live'
+  const voiceModeBtn = el('button', {
+    class: 'btn small',
+    style: 'font-size:10px;padding:3px 8px;background:rgba(46,230,168,0.08);border-color:rgba(46,230,168,0.3);color:var(--mint)',
+    title: 'Toggle between Standard Cloud STT/TTS and Gemini Live API Realtime Dialog',
+    onclick: () => {
+      if (voiceMode === 'standard') {
+        voiceMode = 'live';
+        voiceModeBtn.innerHTML = '⚡ <b>Live Mode</b> (Realtime)';
+        voiceModeBtn.style.color = '#4da6ff';
+        voiceModeBtn.style.borderColor = 'rgba(77,166,255,0.4)';
+        voiceModeBtn.style.background = 'rgba(77,166,255,0.1)';
+        toast('Switched to Gemini Live Mode ⚡ — Realtime bidirectional speech');
+      } else {
+        if (liveActive) stopLiveMode();
+        voiceMode = 'standard';
+        voiceModeBtn.innerHTML = '✦ <b>Standard Voice</b> (STT/TTS)';
+        voiceModeBtn.style.color = 'var(--mint)';
+        voiceModeBtn.style.borderColor = 'rgba(46,230,168,0.3)';
+        voiceModeBtn.style.background = 'rgba(46,230,168,0.08)';
+        toast('Switched to Standard Voice Mode (STT / Brain / TTS)');
+      }
+    }
+  }, '✦ <b>Standard Voice</b> (STT/TTS)');
+
+  // ─── LIVE MODE START / STOP ───
+  async function startLiveMode() {
     stopSpeaking();
+    try {
+      applyState('thinking');
+      statusLeft.textContent = 'Connecting to Gemini Live API WebSocket…';
+      toast('Connecting to Gemini Live API… ⚡');
+
+      let voiceSettings = { micDeviceId: 'default' };
+      if (window.jarvis?.settings?.get) {
+        const saved = await window.jarvis.settings.get('voice_settings');
+        if (saved) voiceSettings = { ...voiceSettings, ...saved };
+      }
+
+      // 1. Initialize WebSocket session in main process
+      await window.jarvis.voice.live.start({});
+
+      // 2. Start microphone AudioContext streaming
+      const audioConstraints = voiceSettings.micDeviceId && voiceSettings.micDeviceId !== 'default'
+        ? { deviceId: { exact: voiceSettings.micDeviceId } }
+        : true;
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          ...((typeof audioConstraints === 'object') ? audioConstraints : {}),
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          sampleRate: 16000,
+          channelCount: 1
+        }
+      });
+
+      audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+      const source = audioContext.createMediaStreamSource(stream);
+      scriptProcessor = audioContext.createScriptProcessor(2048, 1, 1);
+
+      scriptProcessor.onaudioprocess = (e) => {
+        if (!liveActive) return;
+        const inputData = e.inputBuffer.getChannelData(0);
+        const base64Chunk = floatToPcm16Base64(inputData);
+        window.jarvis.voice.live.sendAudio(base64Chunk);
+      };
+
+      source.connect(scriptProcessor);
+      scriptProcessor.connect(audioContext.destination);
+
+      liveActive = true;
+      chatState.recording = true;
+      micBtn.classList.add('mic-on');
+      applyState('listening');
+      statusLeft.textContent = 'Live voice active — bolo Boss (continuous)';
+      toast('⚡ Gemini Live Mode active — boliye!');
+    } catch (err) {
+      console.error('[Live Mode] Start error:', err);
+      toast('Live Mode error: ' + err.message, true);
+      statusLeft.textContent = 'Live Mode failed: ' + err.message;
+      applyState('idle');
+      liveActive = false;
+    }
+  }
+
+  async function stopLiveMode() {
+    liveActive = false;
+    chatState.recording = false;
+    micBtn.classList.remove('mic-on');
+    stopSpeaking();
+
+    if (scriptProcessor) {
+      try { scriptProcessor.disconnect(); } catch (e) {}
+      scriptProcessor = null;
+    }
+    if (audioContext && audioContext.state !== 'closed') {
+      try { audioContext.close(); } catch (e) {}
+      audioContext = null;
+    }
+    if (window.jarvis?.voice?.live?.stop) {
+      await window.jarvis.voice.live.stop();
+    }
+    applyState('idle');
+    statusLeft.textContent = 'Live session ended';
+  }
+
+  // ─── STANDARD MODE MIC RECORDING (Direct 16kHz PCM / WAV capture) ───
+  async function startRecording() {
+    if (voiceMode === 'live') {
+      return startLiveMode();
+    }
+
+    stopSpeaking();
+    pcmBuffers = [];
+    pcmLength = 0;
     audioChunks = [];
 
     try {
@@ -194,54 +469,93 @@ function renderChat(container) {
         ? { deviceId: { exact: voiceSettings.micDeviceId } }
         : true;
 
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
-      const mediaRecorder = new MediaRecorder(stream);
-      activeMediaRecorder = mediaRecorder;
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          ...((typeof audioConstraints === 'object') ? audioConstraints : {}),
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          sampleRate: 16000,
+          channelCount: 1
+        }
+      });
 
-      mediaRecorder.ondataavailable = (e) => {
-        if (e.data && e.data.size > 0) audioChunks.push(e.data);
+      // Capture pure 16kHz mono Float32 PCM samples via AudioContext
+      audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+      const source = audioContext.createMediaStreamSource(stream);
+      scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
+
+      scriptProcessor.onaudioprocess = (e) => {
+        if (!chatState.recording) return;
+        const inputData = e.inputBuffer.getChannelData(0);
+        pcmBuffers.push(new Float32Array(inputData));
+        pcmLength += inputData.length;
       };
 
-      mediaRecorder.onstop = async () => {
-        stream.getTracks().forEach(t => t.stop());
-        if (!audioChunks.length) {
-          applyState('idle');
-          return;
-        }
+      source.connect(scriptProcessor);
+      scriptProcessor.connect(audioContext.destination);
 
-        applyState('thinking');
-        statusLeft.textContent = 'Transcribing voice input (Cloud STT)…';
+      activeMediaRecorder = {
+        stop: async () => {
+          stream.getTracks().forEach(t => t.stop());
+          if (scriptProcessor) {
+            try { scriptProcessor.disconnect(); } catch (e) {}
+            scriptProcessor = null;
+          }
+          if (audioContext && audioContext.state !== 'closed') {
+            try { audioContext.close(); } catch (e) {}
+            audioContext = null;
+          }
 
-        const blob = new Blob(audioChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
-        const arrayBuffer = await blob.arrayBuffer();
+          if (pcmLength === 0) {
+            applyState('idle');
+            statusLeft.textContent = 'No audio captured';
+            return;
+          }
 
-        try {
-          if (window.jarvis?.voice?.transcribe) {
-            const sttRes = await window.jarvis.voice.transcribe(arrayBuffer, {
-              language: voiceSettings.sttLanguage,
-              mimeType: blob.type
-            });
+          // Flatten Float32 samples
+          const flatSamples = new Float32Array(pcmLength);
+          let offset = 0;
+          for (const buf of pcmBuffers) {
+            flatSamples.set(buf, offset);
+            offset += buf.length;
+          }
 
-            if (sttRes && sttRes.text) {
-              const text = sttRes.text.trim();
-              if (text) {
-                toast(`🎙 Transcribed (${sttRes.latencyMs || 0}ms): "${text.slice(0, 35)}…"`);
-                pushMsg({ role: 'user', text });
-                return;
+          // Encode directly to standard 16kHz mono RIFF WAV
+          const wavBuffer = encodeWAV(flatSamples, 16000);
+
+          applyState('thinking');
+          statusLeft.textContent = 'Transcribing voice input (Cloud STT)…';
+          console.log(`[Voice STT] Dispatching 16kHz WAV (${wavBuffer.byteLength} bytes) to VoiceManager.transcribe...`);
+
+          try {
+            if (window.jarvis?.voice?.transcribe) {
+              const sttRes = await window.jarvis.voice.transcribe(wavBuffer, {
+                language: voiceSettings.sttLanguage,
+                mimeType: 'audio/wav'
+              });
+
+              if (sttRes && sttRes.text) {
+                const text = sttRes.text.trim();
+                if (text) {
+                  console.log(`[Voice STT] Successfully transcribed in ${sttRes.latencyMs || 0}ms: "${text}"`);
+                  toast(`🎙 Transcribed (${sttRes.latencyMs || 0}ms): "${text.slice(0, 35)}…"`);
+                  pushMsg({ role: 'user', text });
+                  return;
+                }
               }
             }
+            statusLeft.textContent = 'No speech detected in audio clip';
+            applyState('idle');
+          } catch (err) {
+            console.error('[Voice STT] Transcription error:', err);
+            toast('STT Error: ' + err.message, true);
+            statusLeft.textContent = 'STT error: ' + err.message;
+            applyState('idle');
           }
-          statusLeft.textContent = 'No speech detected';
-          applyState('idle');
-        } catch (err) {
-          console.error('STT Transcription error:', err);
-          toast('STT Error: ' + err.message, true);
-          statusLeft.textContent = 'STT error — check Voice API key';
-          applyState('idle');
         }
       };
 
-      mediaRecorder.start();
       chatState.recording = true;
       micBtn.classList.add('mic-on');
       applyState('listening');
@@ -256,7 +570,11 @@ function renderChat(container) {
   }
 
   function stopRecording() {
-    if (activeMediaRecorder && activeMediaRecorder.state !== 'inactive') {
+    if (voiceMode === 'live') {
+      return stopLiveMode();
+    }
+
+    if (activeMediaRecorder) {
       activeMediaRecorder.stop();
       activeMediaRecorder = null;
     }
@@ -297,7 +615,10 @@ function renderChat(container) {
 
   const center = el('div', { class: 'globe-center' },
     el('div', { class: 'globe-top-row' },
-      el('span', { class: 'hud-tag' }, '◉ NEURAL HARMONIC CORE'),
+      el('div', { style: 'display:flex;align-items:center;gap:8px' },
+        el('span', { class: 'hud-tag' }, '◉ NEURAL HARMONIC CORE'),
+        voiceModeBtn
+      ),
       el('div', { style: 'display:flex;align-items:center;gap:6px' },
         el('span', { class: 'state-chip' }, 'STATE: ', stateChip),
         interruptBtn
@@ -1806,12 +2127,13 @@ async function renderVoice(container) {
         }
       }
 
-      // Fetch models if provider exposes models
-      const mRes = await window.jarvis.voice.fetchModels(flowState.provider, flowState.rawKey, flowState.customEndpoint, forceRefresh);
+      // Fetch models if provider exposes models (filtered to speech/TTS models)
+      const mRes = await window.jarvis.voice.fetchModels(flowState.provider, flowState.rawKey, flowState.customEndpoint, forceRefresh, 'tts');
       flowState.models = mRes?.models || [];
       modelSelect.innerHTML = '';
       flowState.models.forEach(m => {
-        modelSelect.appendChild(el('option', { value: m.id }, '⚡ ' + (m.name || m.id)));
+        const catBadge = m.category ? ` [${m.category.toUpperCase()}]` : '';
+        modelSelect.appendChild(el('option', { value: m.id }, '⚡ ' + (m.name || m.id) + catBadge));
       });
       if (flowState.models.length) {
         flowState.selectedModel = flowState.models[0].id;

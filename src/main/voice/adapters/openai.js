@@ -29,8 +29,9 @@ class OpenAIVoiceAdapter extends BaseVoiceAdapter {
     }
   }
 
-  async fetchModels(key) {
+  async fetchModels(key, options = {}) {
     const cleanKey = String(key).trim();
+    const category = options.category || 'all';
     const url = `${this.baseUrl}/models`;
     const headers = { 'Authorization': `Bearer ${cleanKey}` };
     this.logPreRequest('GET', url, headers);
@@ -47,6 +48,12 @@ class OpenAIVoiceAdapter extends BaseVoiceAdapter {
     // Filter audio models: tts, whisper, audio
     const audioModels = list.filter(m => {
       const id = (m.id || '').toLowerCase();
+      if (category === 'tts') {
+        return id.includes('tts');
+      }
+      if (category === 'stt') {
+        return id.includes('whisper') || id.includes('transcribe');
+      }
       return id.includes('tts') || id.includes('whisper') || id.includes('audio');
     });
 
@@ -142,15 +149,31 @@ class OpenAIVoiceAdapter extends BaseVoiceAdapter {
     let buffer;
     if (Buffer.isBuffer(audioData)) {
       buffer = audioData;
+    } else if (audioData instanceof Uint8Array || audioData instanceof ArrayBuffer) {
+      buffer = Buffer.from(audioData);
     } else if (typeof audioData === 'string') {
       const cleanB64 = audioData.replace(/^data:[^;]+;base64,/, '');
       buffer = Buffer.from(cleanB64, 'base64');
     } else {
-      throw new Error('Invalid audio data format for transcription');
+      throw new Error(`Invalid audio data format for transcription: ${typeof audioData}`);
     }
 
-    const mimeType = options.mimeType || 'audio/wav';
-    const ext = mimeType.includes('mp3') || mimeType.includes('mpeg') ? 'mp3' : mimeType.includes('webm') ? 'webm' : 'wav';
+    if (!buffer || buffer.length === 0) {
+      throw new Error('Audio data buffer is empty (0 bytes)');
+    }
+
+    let mimeType = options.mimeType || 'audio/wav';
+    let ext = 'wav';
+    if (buffer.length >= 4 && buffer.toString('ascii', 0, 4) === 'RIFF') {
+      mimeType = 'audio/wav';
+      ext = 'wav';
+    } else if (buffer.length >= 4 && buffer[0] === 0x1A && buffer[1] === 0x45 && buffer[2] === 0xDF && buffer[3] === 0xA3) {
+      mimeType = 'audio/webm';
+      ext = 'webm';
+    } else if (buffer.length >= 3 && buffer.toString('ascii', 0, 3) === 'ID3') {
+      mimeType = 'audio/mp3';
+      ext = 'mp3';
+    }
 
     // Build multipart/form-data using native Blob and FormData
     const formData = new FormData();
@@ -164,24 +187,51 @@ class OpenAIVoiceAdapter extends BaseVoiceAdapter {
 
     const url = `${this.baseUrl}/audio/transcriptions`;
     const headers = { 'Authorization': `Bearer ${cleanKey}` };
-    this.logPreRequest('POST', url, headers, { model: useModel, mimeType });
 
-    const res = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: formData
-    });
+    console.log(`[Voice STT -> OpenAI] Sending audio transcription request:`);
+    console.log(`  Model: ${useModel}`);
+    console.log(`  Audio: ${buffer.length} bytes | MIME: ${mimeType} | File: speech.${ext}`);
+    console.log(`  Endpoint: ${this.maskUrl(url)}`);
+
+    this.logPreRequest('POST', url, headers, { model: useModel, mimeType, fileBytes: buffer.length });
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
+
+    let res;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: formData,
+        signal: controller.signal
+      });
+    } catch (netErr) {
+      clearTimeout(timeoutId);
+      if (netErr.name === 'AbortError') {
+        throw new Error(`OpenAI STT request timed out after 15 seconds (Endpoint: ${this.maskUrl(url)})`);
+      }
+      throw new Error(`OpenAI STT network error: ${netErr.message}`);
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
     if (!res.ok) {
       const err = await this.parseError(res, { url, model: useModel });
+      console.error(`[Voice STT -> OpenAI] Error response:`, err);
       throw new Error(err.message);
     }
 
     const data = await res.json();
+    const text = (data.text || '').trim();
+    const latencyMs = Date.now() - t0;
+
+    console.log(`[Voice STT -> OpenAI] Transcribed in ${latencyMs}ms: "${text.slice(0, 60)}${text.length > 60 ? '...' : ''}"`);
+
     return {
-      text: (data.text || '').trim(),
+      text,
       language: options.language || 'auto',
-      latencyMs: Date.now() - t0
+      latencyMs
     };
   }
 }

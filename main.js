@@ -136,7 +136,7 @@ ipcMain.handle('voice:detectMismatch', (_e, provider, key) => voiceManager.detec
 ipcMain.handle('voice:getExistingGeminiKey', () => voiceManager.getExistingGeminiKey());
 ipcMain.handle('voice:validateKey', (_e, provider, key, customEndpoint) => voiceManager.validateKey(provider, key, customEndpoint));
 ipcMain.handle('voice:fetchVoices', (_e, provider, key, customEndpoint, forceRefresh) => voiceManager.fetchVoices(provider, key, customEndpoint, forceRefresh));
-ipcMain.handle('voice:fetchModels', (_e, provider, key, customEndpoint, forceRefresh) => voiceManager.fetchModels(provider, key, customEndpoint, forceRefresh));
+ipcMain.handle('voice:fetchModels', (_e, provider, key, customEndpoint, forceRefresh, category) => voiceManager.fetchModels(provider, key, customEndpoint, forceRefresh, category));
 ipcMain.handle('voice:testVoice', (_e, provider, key, voice, model, customEndpoint) => voiceManager.testVoice(provider, key, voice, model, customEndpoint));
 ipcMain.handle('voice:saveKey', (_e, payload) => voiceManager.saveKey(payload));
 ipcMain.handle('voice:getKeys', () => voiceManager.getKeys());
@@ -146,6 +146,12 @@ ipcMain.handle('voice:setActiveKey', (_e, id) => voiceManager.setActiveKey(id));
 ipcMain.handle('voice:getActiveConfig', () => voiceManager.getActiveConfig());
 ipcMain.handle('voice:synthesize', (_e, text, options) => voiceManager.synthesize(text, options));
 ipcMain.handle('voice:transcribe', (_e, audioData, options) => voiceManager.transcribe(audioData, options));
+
+// Live API BidiGenerateContent IPC Handlers
+ipcMain.handle('voice:live:start', (e, opts) => voiceManager.startLiveSession({ ...(opts || {}), windowSender: e.sender }));
+ipcMain.handle('voice:live:sendAudio', (_e, pcmChunk) => voiceManager.sendLiveAudio(pcmChunk));
+ipcMain.handle('voice:live:stop', () => voiceManager.stopLiveSession());
+ipcMain.handle('voice:live:getStatus', () => voiceManager.getLiveStatus());
 
 // ─── Window lifecycle ───────────────────────────────────────────────
 function createWindow() {
