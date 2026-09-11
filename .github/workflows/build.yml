@@ -22,14 +22,14 @@ jobs:
         with:
           node-version: 20
 
-      - name: Read package version
+      - name: Resolve & Auto-Increment Release Version
         id: pkg
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION=$(node -p "require('./package.json').version")
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
-          echo "TAG=v$VERSION" >> $GITHUB_ENV
-          echo "App Version: $VERSION"
+          node scripts/resolve-version.js
 
       - name: Install dependencies (including devDependencies)
         run: npm install --include=dev

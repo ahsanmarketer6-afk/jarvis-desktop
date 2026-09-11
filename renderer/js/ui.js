@@ -740,7 +740,7 @@ function renderChat(container) {
     }
   }, '🎙');
 
-  const versionTag = el('span', {}, 'v1.2.1 — CLOUD VOICE ACTIVE');
+  const versionTag = el('span', {}, 'v1.2.2 — CLOUD VOICE ACTIVE');
   if (window.jarvis?.app?.getVersion) {
     window.jarvis.app.getVersion().then(v => { versionTag.textContent = 'v' + v + ' — CLOUD VOICE ACTIVE'; });
   }
