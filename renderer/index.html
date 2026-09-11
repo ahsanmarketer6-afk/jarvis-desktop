@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'self'; img-src 'self' data:;" />
+  <title>JARVIS OS // SYSTEM</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700;800&family=Rajdhani:wght@500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+
+  <!-- ═══════════ VAULT BOOT SCREEN ═══════════ -->
+  <div id="boot-screen">
+    <div class="boot-corner boot-tl"></div>
+    <div class="boot-corner boot-tr"></div>
+    <div class="boot-corner boot-bl"></div>
+    <div class="boot-corner boot-br"></div>
+    <div class="boot-card">
+      <div class="boot-title">INITIALIZE VAULT</div>
+      <div class="boot-sub"><span class="spin">◌</span> LOADING NEURAL NETS...</div>
+      <div class="boot-scanline"></div>
+      <div class="boot-frame">
+        <div class="boot-frame-corner bfc-tl"></div>
+        <div class="boot-frame-corner bfc-tr"></div>
+        <div class="boot-frame-corner bfc-bl"></div>
+        <div class="boot-frame-corner bfc-br"></div>
+        <div class="boot-frame-text" id="boot-frame-text">AUTHENTICATING OWNER...</div>
+      </div>
+      <button class="boot-override" id="boot-override">⚒ INITIATE MANUAL OVERRIDE</button>
+      <div class="boot-progress-wrap">
+        <div class="boot-progress-label"><span>DECRYPTING VAULT</span><span id="boot-pct">0%</span></div>
+        <div class="boot-progress-track"><div class="boot-progress-fill" id="boot-fill"></div></div>
+      </div>
+    </div>
+    <div class="boot-footer">JARVIS VAULT SECURITY ENGINE V1.0<br /><span>OWNED BY THE BOSS — LOCAL INFERENCE ONLY</span></div>
+    <div class="boot-badges">
+      <span class="boot-badge">◉ KERNEL ACTIVE</span>
+      <span class="boot-badge">▣ ENCLAVE SECURE</span>
+    </div>
+  </div>
+
+  <!-- ═══════════ MAIN APP ═══════════ -->
+  <div id="app" class="hidden">
+
+    <!-- Header -->
+    <header id="topbar">
+      <div class="brand">
+        <div class="brand-icon">◈</div>
+        <div>
+          <div class="brand-name">JARVIS</div>
+          <div class="brand-sub">AGENTIC INTERFACE</div>
+        </div>
+      </div>
+      <nav id="topnav"><!-- filled by JS --></nav>
+      <div class="top-right">
+        <span class="pill"><span class="dot green"></span> ONLINE</span>
+        <span class="pill">◔ 100%</span>
+        <span class="pill clock" id="clock">12:00:00 AM</span>
+      </div>
+    </header>
+
+    <!-- Workspace -->
+    <div id="workspace">
+      <aside id="sidebar">
+        <div class="side-head" id="side-title">MODULE LIBRARY</div>
+        <div class="side-list" id="side-list"><!-- context panel --></div>
+        <div class="side-foot">JARVIS OS // BUILD 1.0.0</div>
+      </aside>
+      <main id="content">
+        <section class="tab active" id="tab-chat"></section>
+        <section class="tab" id="tab-agents"></section>
+        <section class="tab" id="tab-apps"></section>
+        <section class="tab" id="tab-brain"></section>
+        <section class="tab" id="tab-voice"></section>
+        <section class="tab" id="tab-memory"></section>
+        <section class="tab" id="tab-activity"></section>
+        <section class="tab" id="tab-reports"></section>
+        <section class="tab" id="tab-automations"></section>
+        <section class="tab" id="tab-settings"></section>
+      </main>
+    </div>
+  </div>
+
+  <!-- Modal root -->
+  <div id="modal-root"></div>
+
+  <script src="js/data.js"></script>
+  <script src="js/ui.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,59 @@
+{
+  "name": "jarvis-desktop",
+  "productName": "JARVIS",
+  "version": "1.0.0",
+  "description": "JARVIS - Agentic AI operating layer for your laptop",
+  "main": "main.js",
+  "author": {
+    "name": "JARVIS Owner",
+    "email": "jarvis@localhost"
+  },
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis",
+    "publish": "electron-builder --win nsis --publish always"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.9"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.jarvis.desktop",
+    "productName": "JARVIS",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "renderer/assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "JARVIS"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "ahsanmarketer6-afk",
+      "repo": "jarvis-desktop"
+    }
+  }
+}
