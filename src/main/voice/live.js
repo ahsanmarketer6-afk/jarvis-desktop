@@ -2,20 +2,23 @@
 
 const EventEmitter = require('events');
 const db = require('../database');
-const { getVoiceAdapter } = require('./adapters');
 
 /**
  * GeminiLiveSessionManager
  * Manages WebSocket sessions with Gemini Live API (v1alpha BidiGenerateContent).
- * Provides continuous bidirectional audio streaming, realtime responses, and native interruption.
+ * Provides continuous bidirectional audio streaming, realtime responses, auto-reconnection, and native interruption.
  */
 class GeminiLiveSessionManager extends EventEmitter {
   constructor() {
     super();
     this.ws = null;
-    this.activeSession = null;
     this.sessionConfig = null;
     this.isOpen = false;
+    this.isManualStop = false;
+    this.retryCount = 0;
+    this.maxRetries = 3;
+    this.currentTurnTranscript = '';
+    this.windowSender = null;
   }
 
   maskKey(key) {
@@ -25,10 +28,20 @@ class GeminiLiveSessionManager extends EventEmitter {
     return s.slice(0, 4) + '••••••••' + s.slice(-3);
   }
 
+  maskUrl(rawUrl) {
+    if (!rawUrl) return '';
+    return String(rawUrl).replace(/([?&]key=)[^&]+/gi, '$1[MASKED_API_KEY]');
+  }
+
   /**
    * Starts a new Gemini Live WebSocket session.
    */
   async startSession({ apiKey, model, voice = 'Puck', systemInstruction = null, windowSender = null }) {
+    this.isManualStop = false;
+    this.retryCount = 0;
+    this.windowSender = windowSender;
+    this.currentTurnTranscript = '';
+
     if (this.ws) {
       await this.stopSession();
     }
@@ -39,11 +52,22 @@ class GeminiLiveSessionManager extends EventEmitter {
 
     const cleanKey = String(apiKey).trim();
     const cleanModel = (model || 'gemini-2.0-flash-exp').replace(/^(models\/)+/i, '');
+    this.sessionConfig = { model: cleanModel, voice, apiKey: cleanKey, systemInstruction };
+
+    return this.connectWebSocket();
+  }
+
+  async connectWebSocket() {
+    const { cleanKey, cleanModel, voice, systemInstruction } = {
+      cleanKey: this.sessionConfig.apiKey,
+      cleanModel: this.sessionConfig.model,
+      voice: this.sessionConfig.voice,
+      systemInstruction: this.sessionConfig.systemInstruction
+    };
+
     const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(cleanKey)}`;
 
-    console.log(`[Gemini Live API] Connecting to WebSocket endpoint: wss://generativelanguage.googleapis.com/.../BidiGenerateContent (Model: ${cleanModel}, Voice: ${voice})`);
-    
-    this.sessionConfig = { model: cleanModel, voice, apiKey: cleanKey };
+    console.log(`[Gemini Live API] Connecting to WebSocket: ${this.maskUrl(wsUrl)} (Model: ${cleanModel}, Voice: ${voice})`);
     this.isOpen = false;
 
     return new Promise((resolve, reject) => {
@@ -67,6 +91,7 @@ class GeminiLiveSessionManager extends EventEmitter {
       this.ws.onopen = () => {
         console.log('[Gemini Live API] WebSocket connected! Sending setup payload...');
         this.isOpen = true;
+        this.retryCount = 0;
 
         const defaultPrompt = systemInstruction || 'You are JARVIS, an ultra-smart, helpful, witty AI operating layer. Speak naturally, concisely, and conversationally in Roman Urdu and English. Address the user respectfully as Boss.';
 
@@ -74,7 +99,7 @@ class GeminiLiveSessionManager extends EventEmitter {
           setup: {
             model: `models/${cleanModel}`,
             generationConfig: {
-              responseModalities: ['AUDIO'],
+              responseModalities: ['AUDIO', 'TEXT'],
               speechConfig: {
                 voiceConfig: {
                   prebuiltVoiceConfig: {
@@ -104,6 +129,11 @@ class GeminiLiveSessionManager extends EventEmitter {
               'Realtime bidirectional voice stream active',
               'success'
             );
+
+            if (this.windowSender && !this.windowSender.isDestroyed()) {
+              this.windowSender.send('voice:live:status', { status: 'connected', model: cleanModel, voice });
+            }
+
             resolve({
               success: true,
               model: cleanModel,
@@ -121,7 +151,7 @@ class GeminiLiveSessionManager extends EventEmitter {
       };
 
       this.ws.onmessage = (event) => {
-        this.handleIncomingMessage(event.data, windowSender);
+        this.handleIncomingMessage(event.data);
       };
 
       this.ws.onerror = (errEvent) => {
@@ -135,8 +165,8 @@ class GeminiLiveSessionManager extends EventEmitter {
           'failed'
         );
 
-        if (windowSender && !windowSender.isDestroyed()) {
-          windowSender.send('voice:live:error', { error: errorMsg });
+        if (this.windowSender && !this.windowSender.isDestroyed()) {
+          this.windowSender.send('voice:live:error', { error: errorMsg });
         }
 
         if (!resolved) {
@@ -151,8 +181,25 @@ class GeminiLiveSessionManager extends EventEmitter {
         this.isOpen = false;
         this.ws = null;
 
-        if (windowSender && !windowSender.isDestroyed()) {
-          windowSender.send('voice:live:status', { status: 'closed', code: event.code, reason: event.reason });
+        if (this.windowSender && !this.windowSender.isDestroyed()) {
+          this.windowSender.send('voice:live:status', { status: 'closed', code: event.code, reason: event.reason });
+        }
+
+        // Auto-reconnect if dropped unexpectedly during an active user session
+        if (!this.isManualStop && this.sessionConfig && this.retryCount < this.maxRetries) {
+          this.retryCount++;
+          const delay = this.retryCount * 1200;
+          console.log(`[Gemini Live API] Reconnecting session (Attempt ${this.retryCount}/${this.maxRetries}) in ${delay}ms...`);
+          if (this.windowSender && !this.windowSender.isDestroyed()) {
+            this.windowSender.send('voice:live:status', { status: 'reconnecting', attempt: this.retryCount });
+          }
+          setTimeout(() => {
+            if (!this.isManualStop && !this.isOpen) {
+              this.connectWebSocket().catch(err => {
+                console.error('[Gemini Live API] Reconnection failed:', err.message);
+              });
+            }
+          }, delay);
         }
       };
     });
@@ -161,8 +208,8 @@ class GeminiLiveSessionManager extends EventEmitter {
   /**
    * Handles incoming WebSocket messages from Gemini Live server.
    */
-  handleIncomingMessage(rawData, windowSender) {
-    if (!windowSender || windowSender.isDestroyed()) return;
+  handleIncomingMessage(rawData) {
+    if (!this.windowSender || this.windowSender.isDestroyed()) return;
 
     try {
       const text = typeof rawData === 'string' ? rawData : (rawData instanceof Buffer ? rawData.toString('utf8') : '');
@@ -170,26 +217,28 @@ class GeminiLiveSessionManager extends EventEmitter {
 
       const data = JSON.parse(text);
 
-      // 1. Check for server interruption signal (user spoke while model was speaking)
+      // 1. Server interruption signal (user spoke while model was speaking)
       if (data.serverContent?.interrupted) {
         console.log('[Gemini Live API] User interrupted model speech -> broadcasting interrupt');
-        windowSender.send('voice:live:interrupted');
+        this.currentTurnTranscript = '';
+        this.windowSender.send('voice:live:interrupted');
       }
 
       // 2. Extract model turn audio chunks & text transcripts
       const modelTurn = data.serverContent?.modelTurn;
       if (modelTurn && Array.isArray(modelTurn.parts)) {
         for (const part of modelTurn.parts) {
-          // Audio Part
+          // Audio Part (PCM 24kHz)
           if (part.inlineData && part.inlineData.data) {
-            windowSender.send('voice:live:audio', {
+            this.windowSender.send('voice:live:audio', {
               mimeType: part.inlineData.mimeType || 'audio/pcm;rate=24000',
               data: part.inlineData.data
             });
           }
           // Text Transcript Part
           if (part.text) {
-            windowSender.send('voice:live:text', {
+            this.currentTurnTranscript += part.text;
+            this.windowSender.send('voice:live:text', {
               text: part.text,
               isModel: true
             });
@@ -197,9 +246,14 @@ class GeminiLiveSessionManager extends EventEmitter {
         }
       }
 
-      // 3. Turn Complete
+      // 3. Turn Complete: save utterance to DB activity & vault memory
       if (data.serverContent?.turnComplete) {
-        windowSender.send('voice:live:turnComplete');
+        if (this.currentTurnTranscript && this.currentTurnTranscript.trim()) {
+          const finalUtterance = this.currentTurnTranscript.trim();
+          db.logActivity('Gemini Live', `Jarvis Live Reply: "${finalUtterance.slice(0, 60)}${finalUtterance.length > 60 ? '...' : ''}"`, null, 'success');
+          this.currentTurnTranscript = '';
+        }
+        this.windowSender.send('voice:live:turnComplete');
       }
 
     } catch (err) {
@@ -241,6 +295,7 @@ class GeminiLiveSessionManager extends EventEmitter {
    * Stops the active Gemini Live WebSocket session.
    */
   async stopSession() {
+    this.isManualStop = true;
     this.isOpen = false;
     if (this.ws) {
       try {
@@ -248,7 +303,7 @@ class GeminiLiveSessionManager extends EventEmitter {
       } catch (e) {}
       this.ws = null;
     }
-    console.log('[Gemini Live API] Session terminated.');
+    console.log('[Gemini Live API] Session terminated cleanly.');
     return { success: true };
   }
 

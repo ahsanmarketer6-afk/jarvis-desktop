@@ -325,6 +325,21 @@ function renderChat(container) {
       statusLeft.textContent = 'Live Mode error: ' + (data.error || 'Connection lost');
       stopLiveMode();
     });
+
+    if (window.jarvis.voice.live.onStatus) {
+      window.jarvis.voice.live.onStatus((data) => {
+        console.log('[Live Mode] Status update:', data);
+        if (data.status === 'reconnecting') {
+          statusLeft.textContent = `⚡ Live API reconnecting (Attempt ${data.attempt}/3)…`;
+          toast(`⚡ Live connection reconnecting (Attempt ${data.attempt})…`);
+        } else if (data.status === 'connected') {
+          statusLeft.textContent = '⚡ Live voice active — bolo Boss';
+          toast('⚡ Gemini Live Session Connected!');
+        } else if (data.status === 'closed' && liveActive) {
+          statusLeft.textContent = '⚡ Live session closed';
+        }
+      });
+    }
   }
 
   // Interrupt button

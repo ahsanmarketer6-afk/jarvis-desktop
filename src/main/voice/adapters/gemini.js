@@ -180,20 +180,222 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
   }
 
   async testVoice(key, voiceOrModel = 'Puck', testPhrase = 'Salam, main Jarvis hoon', options = {}) {
+    const cleanKey = String(key).trim();
+    let model = options.model;
+    if (!model) {
+      const models = await this.fetchModels(cleanKey, { category: 'tts' }).catch(() => []);
+      const flash = models.find(m => m.id.includes('flash') || m.id.includes('2.0') || m.id.includes('2.5'));
+      model = flash ? flash.id : (models[0]?.id || 'gemini-2.0-flash');
+    }
+    const cleanModel = this.sanitizeModel(model);
+    const voice = (voiceOrModel && voiceOrModel !== model) ? voiceOrModel : (options.voice || 'Puck');
+
+    // Check if this model requires WebSocket Live API (bidiGenerateContent)
+    const isLive = options.isLiveCapable ||
+      cleanModel.includes('native-audio') ||
+      cleanModel.includes('realtime') ||
+      cleanModel.includes('bidi');
+
+    if (isLive) {
+      console.log(`[Gemini Voice Adapter] Target model "${cleanModel}" is a Live API WebSocket model. Executing Live WebSocket test...`);
+      return await this.testVoiceLive(cleanKey, voice, cleanModel);
+    }
+
     try {
-      const result = await this.synthesize(key, voiceOrModel, testPhrase, options);
+      const result = await this.synthesize(cleanKey, voice, testPhrase, { ...options, model: cleanModel });
       return {
         success: true,
         audioBase64: result.audioBase64,
         mimeType: result.mimeType,
-        latencyMs: result.latencyMs
+        latencyMs: result.latencyMs,
+        message: 'Voice test ho gaya ✅'
       };
     } catch (err) {
+      // If REST API fails because this model only supports bidiGenerateContent WebSocket:
+      if (err.message && (err.message.includes('bidiGenerateContent') || err.message.includes('WebSocket'))) {
+        console.log(`[Gemini Voice Adapter] REST call indicated WebSocket required for "${cleanModel}". Automatically rerouting to Live WebSocket test...`);
+        return await this.testVoiceLive(cleanKey, voice, cleanModel);
+      }
+
       return {
         success: false,
         error: err.message
       };
     }
+  }
+
+  /**
+   * Performs an instant test call with Gemini Live API via WebSocket (bidiGenerateContent).
+   * Verifies WebSocket connection, sends setup + test greeting, receives audio chunks, and returns WAV audio.
+   */
+  async testVoiceLive(key, voice = 'Puck', model = 'gemini-2.0-flash-exp') {
+    const t0 = Date.now();
+    const cleanKey = String(key).trim();
+    const cleanModel = this.sanitizeModel(model);
+    const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(cleanKey)}`;
+
+    console.log(`[Gemini Live Test] Connecting to WebSocket: ${this.maskUrl(wsUrl)} [Model: ${cleanModel}, Voice: ${voice}]`);
+
+    return new Promise((resolve) => {
+      let resolved = false;
+      let ws = null;
+      const audioChunks = [];
+      let turnCompleted = false;
+
+      const finishSuccess = () => {
+        if (resolved) return;
+        resolved = true;
+        if (ws) {
+          try { ws.close(); } catch (e) {}
+          ws = null;
+        }
+
+        if (audioChunks.length === 0) {
+          return resolve({
+            success: false,
+            error: 'Gemini Live WebSocket connected but no audio stream was returned.'
+          });
+        }
+
+        const combinedPcm = Buffer.concat(audioChunks);
+        const wavBuffer = this.pcmToWav(combinedPcm, 24000, 1, 16);
+        const latencyMs = Date.now() - t0;
+
+        console.log(`[Gemini Live Test] ✓ Test succeeded in ${latencyMs}ms! Captured ${combinedPcm.length} bytes PCM -> ${wavBuffer.length} bytes WAV.`);
+
+        resolve({
+          success: true,
+          audioBase64: wavBuffer.toString('base64'),
+          mimeType: 'audio/wav',
+          latencyMs,
+          isLive: true,
+          message: 'Live model test ho gaya ✅'
+        });
+      };
+
+      const finishError = (errMsg) => {
+        if (resolved) return;
+        resolved = true;
+        if (ws) {
+          try { ws.close(); } catch (e) {}
+          ws = null;
+        }
+        console.error(`[Gemini Live Test] ✕ Failed: ${errMsg}`);
+        resolve({
+          success: false,
+          error: errMsg
+        });
+      };
+
+      const timeoutId = setTimeout(() => {
+        if (!resolved) {
+          if (audioChunks.length > 0) {
+            finishSuccess();
+          } else {
+            finishError('Gemini Live API WebSocket test timed out after 12 seconds.');
+          }
+        }
+      }, 12000);
+
+      try {
+        ws = new WebSocket(wsUrl);
+      } catch (err) {
+        clearTimeout(timeoutId);
+        return finishError(`WebSocket creation error: ${err.message}`);
+      }
+
+      ws.onopen = () => {
+        console.log('[Gemini Live Test] WebSocket opened. Sending setup payload...');
+
+        const setupPayload = {
+          setup: {
+            model: `models/${cleanModel}`,
+            generationConfig: {
+              responseModalities: ['AUDIO', 'TEXT'],
+              speechConfig: {
+                voiceConfig: {
+                  prebuiltVoiceConfig: {
+                    voiceName: voice || 'Puck'
+                  }
+                }
+              }
+            },
+            systemInstruction: {
+              parts: [{
+                text: 'You are JARVIS. Say a brief 4-word greeting to test voice playback.'
+              }]
+            }
+          }
+        };
+
+        try {
+          ws.send(JSON.stringify(setupPayload));
+
+          // Immediately send initial client greeting
+          const clientTurn = {
+            clientContent: {
+              turns: [
+                {
+                  role: 'user',
+                  parts: [{ text: 'Salam Jarvis, test voice greeting.' }]
+                }
+              ],
+              turnComplete: true
+            }
+          };
+
+          ws.send(JSON.stringify(clientTurn));
+          console.log('[Gemini Live Test] Client turn sent. Awaiting audio chunks...');
+        } catch (err) {
+          clearTimeout(timeoutId);
+          finishError(`Failed to send setup to WebSocket: ${err.message}`);
+        }
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const raw = typeof event.data === 'string' ? event.data : (event.data instanceof Buffer ? event.data.toString('utf8') : '');
+          if (!raw) return;
+
+          const data = JSON.parse(raw);
+
+          // Check for modelTurn audio chunks
+          const modelTurn = data.serverContent?.modelTurn;
+          if (modelTurn && Array.isArray(modelTurn.parts)) {
+            for (const part of modelTurn.parts) {
+              if (part.inlineData?.data) {
+                const chunkBuf = Buffer.from(part.inlineData.data, 'base64');
+                audioChunks.push(chunkBuf);
+              }
+            }
+          }
+
+          // Check if turn completed
+          if (data.serverContent?.turnComplete) {
+            turnCompleted = true;
+            clearTimeout(timeoutId);
+            setTimeout(finishSuccess, 150);
+          }
+        } catch (err) {
+          console.error('[Gemini Live Test] Error parsing message:', err);
+        }
+      };
+
+      ws.onerror = (errEvent) => {
+        clearTimeout(timeoutId);
+        const errorMsg = errEvent.message || 'WebSocket connection error with Gemini Live endpoint';
+        finishError(`Google AI (Gemini Live) error: ${errorMsg}`);
+      };
+
+      ws.onclose = (closeEvent) => {
+        clearTimeout(timeoutId);
+        if (closeEvent.code !== 1000 && !turnCompleted && audioChunks.length === 0) {
+          finishError(`Google AI (Gemini Live) WebSocket closed (Code ${closeEvent.code}): ${closeEvent.reason || 'Unexpected closure'}`);
+        } else if (audioChunks.length > 0) {
+          finishSuccess();
+        }
+      };
+    });
   }
 
   async synthesize(key, voice = 'Puck', text, options = {}) {
