@@ -701,23 +701,33 @@ function renderVoice(container) {
   );
 }
 
-/* ═══════════════════════════════════ 6. MEMORY ═══════════════════════════════════ */
+/* ═══════════════════════════════════ 6. MEMORY — LIVE SQLite ═══════════════════════════════════ */
 
 function renderMemory(container) {
   container.innerHTML = '';
-  let items = MEMORY_SEED.map(m => ({ ...m }));
 
   const search = el('input', { class: 'input', placeholder: '🔍  Search memory… (text, namespace, agent)' });
   const wrap = el('div', { class: 'ns-grid' });
+  let items = [];
+  const hasDB = !!(window.jarvis && window.jarvis.db);
+
+  async function load() {
+    if (hasDB) {
+      try { items = await window.jarvis.db.memory.list({ limit: 500 }); }
+      catch (e) { toast('DB read failed: ' + e.message, true); items = []; }
+    }
+    draw();
+  }
 
   function draw() {
     const q = search.value.toLowerCase();
     wrap.innerHTML = '';
     const groups = {};
-    items.filter(m => !q || (m.text + m.ns + m.agent).toLowerCase().includes(q))
-      .forEach(m => { (groups[m.ns] = groups[m.ns] || []).push(m); });
+    items.filter(m => !q || ((m.content || '') + m.namespace + m.source_agent).toLowerCase().includes(q))
+      .forEach(m => { (groups[m.namespace] = groups[m.namespace] || []).push(m); });
     if (!Object.keys(groups).length) {
-      wrap.appendChild(el('div', { class: 'empty' }, el('div', { class: 'e-ic' }, '▦'), el('div', { class: 'e-tx' }, 'NO MEMORIES FOUND')));
+      wrap.appendChild(el('div', { class: 'empty' }, el('div', { class: 'e-ic' }, '▦'),
+        el('div', { class: 'e-tx' }, hasDB ? 'NO MEMORIES YET — ADD YOUR FIRST' : 'DB BRIDGE UNAVAILABLE (dev mode)')));
       return;
     }
     Object.entries(groups).forEach(([ns, list]) => {
@@ -727,29 +737,34 @@ function renderMemory(container) {
           el('span', { class: 'muted' }, list.length + ' ENTRIES')
         ),
         ...list.map(m => {
-          const editText = el('textarea', { class: 'input', style: 'min-height:60px' }, m.text);
+          const editText = el('textarea', { class: 'input', style: 'min-height:60px' }, m.content || '');
           return el('div', { class: 'mem-card' },
             el('div', { style: 'flex:1' },
-              el('div', { class: 'mem-text' }, m.text),
+              el('div', { class: 'mem-text' }, m.content || ''),
               el('div', { class: 'mem-meta' },
-                el('span', {}, '◷ ' + m.date),
-                el('span', {}, '◈ ' + m.agent)
+                el('span', {}, '◷ ' + (m.created_at || '').slice(0, 10)),
+                el('span', {}, '◈ ' + m.source_agent),
+                m.encrypted ? el('span', { class: 'badge green' }, '⛨ ENCRYPTED') : null
               )
             ),
-            el('button', { class: 'icon-btn', title: 'Edit', onclick: () => {
+            el('button', { class: 'icon-btn', title: 'Edit', onclick: async () => {
               openModal({
                 title: 'EDIT MEMORY',
-                sub: ns.toUpperCase() + ' • ' + m.date,
+                sub: ns.toUpperCase() + ' • ' + (m.created_at || '').slice(0, 10),
                 body: el('div', { class: 'form-row' }, editText),
                 actions: [
                   el('button', { class: 'btn', onclick: closeModal }, 'CANCEL'),
-                  el('button', { class: 'btn primary', onclick: () => { m.text = editText.value; closeModal(); draw(); toast('Memory updated'); } }, 'SAVE')
+                  el('button', { class: 'btn primary', onclick: async () => {
+                    if (hasDB) await window.jarvis.db.memory.update(m.id, { content: editText.value });
+                    closeModal(); await load(); toast('Memory updated in database');
+                  } }, 'SAVE')
                 ]
               });
             }}, '✎'),
             el('button', { class: 'icon-btn del', title: 'Delete', onclick: () =>
-              confirmModal('Delete memory?', '"' + m.text.slice(0, 60) + (m.text.length > 60 ? '…' : '') + '" — yeh wapas nahi aayegi.', () => {
-                items = items.filter(x => x !== m); draw(); toast('Memory deleted');
+              confirmModal('Delete memory?', '"' + (m.content || '').slice(0, 60) + (m.content && m.content.length > 60 ? '…' : '') + '" — database se permanently delete hoga.', async () => {
+                if (hasDB) await window.jarvis.db.memory.delete(m.id);
+                await load(); toast('Memory deleted from database');
               })
             }, '🗑')
           );
@@ -758,29 +773,37 @@ function renderMemory(container) {
     });
   }
   search.oninput = draw;
-  draw();
+  load();
 
   container.append(
     el('div', { class: 'panel' },
       el('div', { class: 'panel-head' },
-        el('div', { class: 'panel-title' }, el('span', { class: 'pt-ic' }, '▦'), 'MEMORY BANK'),
+        el('div', { class: 'panel-title' }, el('span', { class: 'pt-ic' }, '▦'), 'MEMORY BANK', el('span', { class: 'badge green', style: 'margin-left:6px' }, '● SQLITE PERSISTENT')),
         el('button', { class: 'btn primary', onclick: () => {
           const nsSel = el('select', { class: 'select' }, ...['Personal', 'Workspace', 'News', 'Preferences', 'Contacts'].map(n => el('option', {}, n)));
           const txt = el('textarea', { class: 'input', style: 'min-height:80px', placeholder: 'Yeh memory save karni hai…' });
+          const encT = el('div', { class: 'toggle' });
+          encT.onclick = () => encT.classList.toggle('on');
           openModal({
             title: 'ADD MEMORY',
-            sub: 'Memory agent iske namespace mein save karega',
+            sub: 'Memory database mein save hogi — restart ke baad bhi rahegi',
             body: el('div', {},
               el('div', { class: 'form-row' }, el('div', { class: 'form-label' }, '▤ NAMESPACE'), nsSel),
-              el('div', { class: 'form-row' }, el('div', { class: 'form-label' }, '✎ TEXT'), txt)
+              el('div', { class: 'form-row' }, el('div', { class: 'form-label' }, '✎ TEXT'), txt),
+              el('div', { class: 'set-row' },
+                el('div', {}, el('div', { class: 'set-label' }, 'Encrypt at rest'), el('div', { class: 'set-desc' }, 'AES-256-GCM vault encryption (machine-bound)')),
+                encT)
             ),
             actions: [
               el('button', { class: 'btn', onclick: closeModal }, 'CANCEL'),
-              el('button', { class: 'btn primary', onclick: () => {
+              el('button', { class: 'btn primary', onclick: async () => {
                 if (!txt.value.trim()) { toast('Text khali hai — kuch likhein', true); return; }
-                items.unshift({ ns: nsSel.value, text: txt.value.trim(), date: new Date().toISOString().slice(0, 10), agent: 'Memory' });
-                closeModal(); draw(); toast('Memory saved to ' + nsSel.value);
-              }}, 'SAVE')
+                if (hasDB) {
+                  await window.jarvis.db.memory.add({ namespace: nsSel.value, content: txt.value.trim(), encrypted: encT.classList.contains('on') ? 1 : 0, sourceAgent: 'Memory' });
+                  await window.jarvis.db.activity.insert({ agentName: 'Memory', action: 'Memory saved to ' + nsSel.value + (encT.classList.contains('on') ? ' (encrypted)' : ''), details: { namespace: nsSel.value } });
+                }
+                closeModal(); await load(); toast('Memory saved to database (' + nsSel.value + ')');
+              }}, 'SAVE TO DATABASE')
             ]
           });
         }}, '+ ADD MEMORY')
@@ -795,39 +818,59 @@ function renderMemory(container) {
 function renderActivity(container) {
   container.innerHTML = '';
   const search = el('input', { class: 'input', placeholder: '🔍  Filter actions…' });
-  const agentSel = el('select', { class: 'select' },
-    el('option', { value: '' }, 'ALL AGENTS'),
-    ...[...new Set(ACTIVITY_SEED.map(a => a.agent))].map(a => el('option', {}, a)));
+  const agentSel = el('select', { class: 'select' }, el('option', { value: '' }, 'ALL AGENTS'));
   const typeSel = el('select', { class: 'select' },
     el('option', { value: '' }, 'ALL TYPES'),
     el('option', { value: 'success' }, 'SUCCESS'),
     el('option', { value: 'failed' }, 'FAILED'));
   const list = el('div');
+  let rows = [];
+  const hasDB = !!(window.jarvis && window.jarvis.db);
+
+  async function load() {
+    if (hasDB) {
+      try { rows = await window.jarvis.db.activity.list({ limit: 300 }); }
+      catch (e) { toast('DB read failed: ' + e.message, true); rows = []; }
+      [...new Set(rows.map(r => r.agent_name))].forEach(a => agentSel.appendChild(el('option', {}, a)));
+    }
+    draw();
+  }
 
   function draw() {
     const q = search.value.toLowerCase();
     list.innerHTML = '';
-    ACTIVITY_SEED.filter(l =>
-      (!q || l.action.toLowerCase().includes(q)) &&
-      (!agentSel.value || l.agent === agentSel.value) &&
+    if (!rows.length) {
+      list.appendChild(el('div', { class: 'empty' }, el('div', { class: 'e-ic' }, '☰'),
+        el('div', { class: 'e-tx' }, hasDB ? 'NO ACTIVITY YET — SYSTEM EVENTS YAHAN LOG HONGE' : 'DB BRIDGE UNAVAILABLE (dev mode)')));
+      return;
+    }
+    rows.filter(l =>
+      (!q || (l.action || '').toLowerCase().includes(q)) &&
+      (!agentSel.value || l.agent_name === agentSel.value) &&
       (!typeSel.value || l.status === typeSel.value)
     ).forEach(l => {
       list.appendChild(el('div', { class: 'log-row' },
-        el('span', { class: 'log-time' }, '◷ ' + l.time),
-        el('span', { class: 'log-agent' }, l.agent),
+        el('span', { class: 'log-time' }, '◷ ' + (l.timestamp || '').replace('T', ' ').slice(0, 19)),
+        el('span', { class: 'log-agent' }, l.agent_name),
         el('span', { class: 'log-action' }, l.action),
-        el('span', { class: 'badge ' + (l.status === 'success' ? 'green' : 'red') }, l.status.toUpperCase())
+        el('span', { class: 'badge ' + (l.status === 'success' ? 'green' : 'red') }, (l.status || '').toUpperCase())
       ));
     });
   }
   search.oninput = draw; agentSel.onchange = draw; typeSel.onchange = draw;
-  draw();
+  load();
 
   container.append(
     el('div', { class: 'panel' },
       el('div', { class: 'panel-head' },
-        el('div', { class: 'panel-title' }, el('span', { class: 'pt-ic' }, '☰'), 'ACTIVITY LOG'),
-        el('button', { class: 'btn', onclick: () => toast('Log exported: jarvis-activity-2026-09-10.log (mock)') }, '⭳ EXPORT LOG')
+        el('div', { class: 'panel-title' }, el('span', { class: 'pt-ic' }, '☰'), 'ACTIVITY LOG', el('span', { class: 'badge green', style: 'margin-left:6px' }, '● SQLITE PERSISTENT')),
+        el('button', { class: 'btn', onclick: async () => {
+          const lines = rows.map(r => (r.timestamp || '') + ' | ' + r.agent_name + ' | ' + r.action + ' | ' + r.status).join('\n');
+          const blob = new Blob([lines], { type: 'text/plain' });
+          const a = el('a', { href: URL.createObjectURL(blob), download: 'jarvis-activity-log.txt' });
+          document.body.appendChild(a); a.click(); a.remove();
+          toast('Log exported: jarvis-activity-log.txt');
+        } }, '⭳ EXPORT LOG')
       ),
       el('div', { class: 'filter-row' }, search, agentSel, typeSel),
       list
@@ -983,19 +1026,75 @@ function renderAutomations(container) {
 
 /* ═══════════════════════════════════ 10. SETTINGS ═══════════════════════════════════ */
 
-function renderSettings(container) {
+async function renderSettings(container) {
   container.innerHTML = '';
   const ver = el('span', { class: 'usage-num' }, '…');
   if (window.jarvis) window.jarvis.app.getVersion().then(v => ver.textContent = 'v' + v);
 
+  /* ── Database status panel (live from main-process SQLite) ── */
+  const dbBody = el('div', { class: 'muted' }, '◌ Checking database…');
+  (async () => {
+    if (!window.jarvis || !window.jarvis.db) { dbBody.innerHTML = '<span style="color:var(--red)">✕ DB bridge unavailable</span>'; return; }
+    try {
+      const s = await window.jarvis.db.status();
+      if (!s.connected) { dbBody.innerHTML = '<span style="color:var(--red)">✕ Database disconnected</span>'; return; }
+      const kb = (s.sizeBytes / 1024).toFixed(1);
+      const shortPath = String(s.path).replace(/^.*AppData[\\/]+Roaming[\\/]+/i, '%APPDATA%/');
+      dbBody.innerHTML =
+        '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">' +
+        '<span class="badge green">● CONNECTED</span>' +
+        '<span class="badge blue">SCHEMA v' + s.version + '</span>' +
+        '<span class="badge gray">' + kb + ' KB</span></div>' +
+        '<div class="form-hint" style="margin-top:0">' + shortPath + '</div>';
+      const rows = [
+        ['api_keys', 'API keys (Phase 2b ready)'],
+        ['settings', 'Settings entries'],
+        ['memory', 'Memory entries'],
+        ['activity_log', 'Activity entries'],
+        ['workflows', 'Workflows'],
+        ['notifications', 'Notifications'],
+        ['schema_version', 'Migrations applied']
+      ];
+      const grid = el('div', { class: 'summary-grid', style: 'margin-top:12px;margin-bottom:0' });
+      rows.forEach(([t, label]) => {
+        grid.appendChild(el('div', { class: 'bill-card' },
+          el('div', { class: 'bill-label' }, label.toUpperCase()),
+          el('div', { class: 'bill-val' }, String(s.tables[t] ?? 0))));
+      });
+      dbBody.appendChild(grid);
+    } catch (e) {
+      dbBody.innerHTML = '<span style="color:var(--red)">✕ DB error: ' + e.message + '</span>';
+    }
+  })();
+
+  const hasDB = !!(window.jarvis && window.jarvis.db);
+  let saved = {};
+  if (hasDB) { try { saved = await window.jarvis.db.settings.getAll(); } catch (e) { saved = {}; } }
+
   const langSel = el('select', { class: 'select' },
-    el('option', {}, 'Urdu + English (Auto)'), el('option', {}, 'English only'), el('option', {}, 'اردو only'));
-  langSel.value = SETTINGS_SEED.language;
-  const wake = el('div', { class: 'toggle on' });
-  const startup = el('div', { class: 'toggle on' });
-  const confirmT = el('div', { class: 'toggle on' });
-  const mkToggle = (t, label) => { t.onclick = () => { t.classList.toggle('on'); toast(label + ': ' + (t.classList.contains('on') ? 'ON' : 'OFF')); }; };
-  mkToggle(wake, 'Wake word'); mkToggle(startup, 'Launch at startup'); mkToggle(confirmT, 'Destructive confirmation');
+    el('option', { value: 'ur-en' }, 'Urdu + English (Auto)'),
+    el('option', { value: 'en' }, 'English only'),
+    el('option', { value: 'ur' }, 'اردو only'));
+  langSel.value = (saved.language !== undefined) ? saved.language : 'ur-en';
+  langSel.onchange = async () => {
+    if (hasDB) await window.jarvis.db.settings.set('language', langSel.value);
+    toast('Language saved to database: ' + langSel.selectedOptions[0].text);
+  };
+
+  const mkPersistToggle = (key, initial, label) => {
+    const t = el('div', { class: 'toggle' + (initial ? ' on' : '') });
+    t.onclick = async () => {
+      t.classList.toggle('on');
+      const on = t.classList.contains('on');
+      if (hasDB) await window.jarvis.db.settings.set(key, on);
+      if (hasDB) await window.jarvis.db.activity.insert({ agentName: 'Settings', action: label + ' → ' + (on ? 'ON' : 'OFF'), details: { key } });
+      toast(label + ': ' + (on ? 'ON' : 'OFF') + (hasDB ? ' (saved)' : ''));
+    };
+    return t;
+  };
+  const wake = mkPersistToggle('wakeWord', saved.wakeWord !== undefined ? saved.wakeWord : true, 'Wake word');
+  const startup = mkPersistToggle('launchAtStartup', saved.launchAtStartup !== undefined ? saved.launchAtStartup : true, 'Launch at startup');
+  const confirmT = mkPersistToggle('confirmDestructive', saved.confirmDestructive !== undefined ? saved.confirmDestructive : true, 'Destructive confirmation');
 
   const updStatus = el('div', { class: 'upd-status' }, '◌ Ready. Version check karne ke liye button dabayein.');
   const updBar = el('div', { class: 'track upd-bar hidden' }, el('div', { class: 'fill', style: 'width:0%' }));
@@ -1048,6 +1147,10 @@ function renderSettings(container) {
   }
 
   container.append(
+    el('div', { class: 'panel mb14' },
+      el('div', { class: 'panel-title mb14' }, el('span', { class: 'pt-ic' }, '⛁'), 'DATABASE STATUS'),
+      dbBody
+    ),
     el('div', { class: 'set-grid' },
       el('div', { class: 'panel' },
         el('div', { class: 'panel-title mb14' }, el('span', { class: 'pt-ic' }, '⚙'), 'GENERAL'),

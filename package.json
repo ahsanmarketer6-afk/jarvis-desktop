@@ -1,7 +1,7 @@
 {
   "name": "jarvis-desktop",
   "productName": "JARVIS",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "JARVIS - Agentic AI operating layer for your laptop",
   "main": "main.js",
   "author": {
@@ -11,10 +11,12 @@
   "license": "MIT",
   "scripts": {
     "start": "electron .",
+    "postinstall": "node scripts/rebuild-native.js",
     "dist": "electron-builder --win nsis",
     "publish": "electron-builder --win nsis --publish always"
   },
   "dependencies": {
+    "better-sqlite3": "11.10.0",
     "electron-updater": "^6.3.9"
   },
   "devDependencies": {
@@ -24,6 +26,12 @@
   "build": {
     "appId": "com.jarvis.desktop",
     "productName": "JARVIS",
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/better-sqlite3/**",
+      "node_modules/bindings/**",
+      "node_modules/file-uri-to-path/**"
+    ],
     "directories": {
       "output": "dist"
     },
@@ -31,6 +39,7 @@
       "main.js",
       "preload.js",
       "renderer/**/*",
+      "src/**/*",
       "package.json"
     ],
     "win": {
