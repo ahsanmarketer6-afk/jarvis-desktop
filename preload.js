@@ -87,5 +87,23 @@ contextBridge.exposeInMainWorld('jarvis', {
           if (switchListener) ipcRenderer.removeListener(`brain:chat:switch:${requestId}`, switchListener);
         });
     }
+  },
+  // Voice API system (The Single STT/TTS Runtime Path)
+  voice: {
+    getProviders: () => ipcRenderer.invoke('voice:getProviders'),
+    detectMismatch: (provider, key) => ipcRenderer.invoke('voice:detectMismatch', provider, key),
+    getExistingGeminiKey: () => ipcRenderer.invoke('voice:getExistingGeminiKey'),
+    validateKey: (provider, key, customEndpoint) => ipcRenderer.invoke('voice:validateKey', provider, key, customEndpoint),
+    fetchVoices: (provider, key, customEndpoint, forceRefresh) => ipcRenderer.invoke('voice:fetchVoices', provider, key, customEndpoint, forceRefresh),
+    fetchModels: (provider, key, customEndpoint, forceRefresh) => ipcRenderer.invoke('voice:fetchModels', provider, key, customEndpoint, forceRefresh),
+    testVoice: (provider, key, voice, model, customEndpoint) => ipcRenderer.invoke('voice:testVoice', provider, key, voice, model, customEndpoint),
+    saveKey: (payload) => ipcRenderer.invoke('voice:saveKey', payload),
+    getKeys: () => ipcRenderer.invoke('voice:getKeys'),
+    reorderKeys: (ids) => ipcRenderer.invoke('voice:reorderKeys', ids),
+    deleteKey: (id) => ipcRenderer.invoke('voice:deleteKey', id),
+    setActiveKey: (id) => ipcRenderer.invoke('voice:setActiveKey', id),
+    getActiveConfig: () => ipcRenderer.invoke('voice:getActiveConfig'),
+    synthesize: (text, options) => ipcRenderer.invoke('voice:synthesize', text, options),
+    transcribe: (audioData, options) => ipcRenderer.invoke('voice:transcribe', audioData, options)
   }
 });

@@ -9,6 +9,7 @@ const path = require('path');
 const { autoUpdater } = require('electron-updater');
 const db = require('./src/main/database');
 const { brainManager } = require('./src/main/brain');
+const { voiceManager } = require('./src/main/voice');
 
 let mainWindow = null;
 
@@ -128,6 +129,23 @@ ipcMain.handle('brain:chat', async (event, { messages, options, requestId }) => 
 
   return await brainManager.chat(messages, options || {}, onChunk, onKeySwitch);
 });
+
+// ─── IPC: Voice API Runtime (The Single STT/TTS Path) ──────────────
+ipcMain.handle('voice:getProviders', () => voiceManager.getProviders());
+ipcMain.handle('voice:detectMismatch', (_e, provider, key) => voiceManager.detectMismatch(provider, key));
+ipcMain.handle('voice:getExistingGeminiKey', () => voiceManager.getExistingGeminiKey());
+ipcMain.handle('voice:validateKey', (_e, provider, key, customEndpoint) => voiceManager.validateKey(provider, key, customEndpoint));
+ipcMain.handle('voice:fetchVoices', (_e, provider, key, customEndpoint, forceRefresh) => voiceManager.fetchVoices(provider, key, customEndpoint, forceRefresh));
+ipcMain.handle('voice:fetchModels', (_e, provider, key, customEndpoint, forceRefresh) => voiceManager.fetchModels(provider, key, customEndpoint, forceRefresh));
+ipcMain.handle('voice:testVoice', (_e, provider, key, voice, model, customEndpoint) => voiceManager.testVoice(provider, key, voice, model, customEndpoint));
+ipcMain.handle('voice:saveKey', (_e, payload) => voiceManager.saveKey(payload));
+ipcMain.handle('voice:getKeys', () => voiceManager.getKeys());
+ipcMain.handle('voice:reorderKeys', (_e, ids) => voiceManager.reorderKeys(ids));
+ipcMain.handle('voice:deleteKey', (_e, id) => voiceManager.deleteKey(id));
+ipcMain.handle('voice:setActiveKey', (_e, id) => voiceManager.setActiveKey(id));
+ipcMain.handle('voice:getActiveConfig', () => voiceManager.getActiveConfig());
+ipcMain.handle('voice:synthesize', (_e, text, options) => voiceManager.synthesize(text, options));
+ipcMain.handle('voice:transcribe', (_e, audioData, options) => voiceManager.transcribe(audioData, options));
 
 // ─── Window lifecycle ───────────────────────────────────────────────
 function createWindow() {

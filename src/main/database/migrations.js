@@ -92,6 +92,34 @@ const MIGRATIONS = [
         // column may already exist
       }
     }
+  },
+  {
+    version: 3,
+    name: 'voice-keys-and-settings-schema',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS voice_keys (
+          id             INTEGER PRIMARY KEY AUTOINCREMENT,
+          provider       TEXT NOT NULL,
+          key_name       TEXT NOT NULL,
+          encrypted_key  BLOB NOT NULL,
+          key_hash       TEXT NOT NULL UNIQUE,
+          selected_voice TEXT,
+          selected_model TEXT,
+          custom_endpoint TEXT,
+          is_active      INTEGER NOT NULL DEFAULT 1,
+          priority       INTEGER NOT NULL DEFAULT 100,
+          quota_used     INTEGER NOT NULL DEFAULT 0,
+          quota_limit    INTEGER NOT NULL DEFAULT 0,
+          last_used      TEXT,
+          status         TEXT NOT NULL DEFAULT 'valid' CHECK (status IN ('valid','invalid','expired')),
+          created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_voice_keys_prov ON voice_keys(provider);
+        CREATE INDEX IF NOT EXISTS idx_voice_keys_active ON voice_keys(is_active);
+      `);
+    }
   }
 ];
 

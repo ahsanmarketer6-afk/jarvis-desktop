@@ -258,6 +258,112 @@ function reorderApiKeys(ids) {
   return true;
 }
 
+/* ─── Voice API Keys repository ────────────────────────────────── */
+
+function insertVoiceKey({ provider, keyName, rawKey, selectedVoice = null, selectedModel = null, customEndpoint = null, priority = 100, isActive = true, status = 'valid' }) {
+  const enc = vault.encrypt(rawKey);
+  const keyHash = vault.hash(rawKey);
+
+  // Check if hash already exists -> update it
+  const existing = db.prepare('SELECT id FROM voice_keys WHERE key_hash = ?').get(keyHash);
+  if (existing) {
+    db.prepare(`UPDATE voice_keys SET
+      provider = ?,
+      key_name = ?,
+      encrypted_key = ?,
+      selected_voice = ?,
+      selected_model = ?,
+      custom_endpoint = ?,
+      priority = ?,
+      is_active = ?,
+      status = ?,
+      updated_at = datetime('now')
+      WHERE id = ?`).run(provider, keyName, enc, selectedVoice, selectedModel, customEndpoint, priority, isActive ? 1 : 0, status, existing.id);
+    return existing.id;
+  }
+
+  const info = db.prepare(`INSERT INTO voice_keys
+    (provider, key_name, encrypted_key, key_hash, selected_voice, selected_model, custom_endpoint, is_active, priority, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      provider, keyName, enc, keyHash, selectedVoice, selectedModel, customEndpoint, isActive ? 1 : 0, priority, status
+    );
+  return info.lastInsertRowid;
+}
+
+function listVoiceKeys() {
+  const rows = db.prepare('SELECT * FROM voice_keys ORDER BY priority ASC, id ASC').all();
+  return rows.map(r => {
+    let masked = '••••••••';
+    try {
+      const dec = vault.decrypt(r.encrypted_key);
+      masked = maskKey(dec);
+    } catch (e) {
+      masked = '••••••••';
+    }
+    return {
+      id: r.id,
+      provider: r.provider,
+      key_name: r.key_name,
+      masked_key: masked,
+      selected_voice: r.selected_voice,
+      selected_model: r.selected_model,
+      custom_endpoint: r.custom_endpoint,
+      is_active: r.is_active,
+      priority: r.priority,
+      quota_used: r.quota_used,
+      quota_limit: r.quota_limit,
+      last_used: r.last_used,
+      status: r.status,
+      created_at: r.created_at,
+      updated_at: r.updated_at
+    };
+  });
+}
+
+function getDecryptedVoiceKey(id) {
+  const row = db.prepare('SELECT * FROM voice_keys WHERE id = ?').get(id);
+  if (!row) return null;
+  const raw = vault.decrypt(row.encrypted_key);
+  return { ...row, raw_key: raw };
+}
+
+function getActiveVoiceKeys() {
+  const rows = db.prepare("SELECT * FROM voice_keys WHERE status != 'invalid' AND is_active = 1 ORDER BY priority ASC, id ASC").all();
+  return rows.map(r => {
+    try {
+      const raw = vault.decrypt(r.encrypted_key);
+      return { ...r, raw_key: raw };
+    } catch (e) {
+      return null;
+    }
+  }).filter(Boolean);
+}
+
+function updateVoiceKey(id, patch) {
+  const allowed = ['key_name', 'selected_voice', 'selected_model', 'custom_endpoint', 'is_active', 'priority', 'status', 'quota_used', 'quota_limit', 'last_used'];
+  const keys = Object.keys(patch).filter(k => allowed.includes(k));
+  if (!keys.length) return false;
+  const sets = keys.map(k => `${k} = ?`).join(', ');
+  db.prepare(`UPDATE voice_keys SET ${sets}, updated_at = datetime('now') WHERE id = ?`)
+    .run(...keys.map(k => patch[k]), id);
+  return true;
+}
+
+function deleteVoiceKey(id) {
+  db.prepare('DELETE FROM voice_keys WHERE id = ?').run(id);
+  return true;
+}
+
+function reorderVoiceKeys(ids) {
+  const tx = db.transaction(() => {
+    ids.forEach((id, idx) => {
+      db.prepare("UPDATE voice_keys SET priority = ?, updated_at = datetime('now') WHERE id = ?").run(idx + 1, id);
+    });
+  });
+  tx();
+  return true;
+}
+
 /* generic CRUD used by workflows / notifications now, others later */
 function insert(table, obj) {
   const allowed = ['workflows', 'notifications'];
@@ -294,8 +400,12 @@ function remove(table, id) {
 function status() {
   if (!db) return { connected: false };
   const tables = {};
-  for (const t of ['api_keys', 'settings', 'memory', 'activity_log', 'workflows', 'notifications', 'schema_version']) {
-    tables[t] = db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get().n;
+  for (const t of ['api_keys', 'voice_keys', 'settings', 'memory', 'activity_log', 'workflows', 'notifications', 'schema_version']) {
+    try {
+      tables[t] = db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get().n;
+    } catch (e) {
+      tables[t] = 0;
+    }
   }
   const version = db.prepare('SELECT MAX(version) AS v FROM schema_version').get().v || 0;
   return {
@@ -315,5 +425,6 @@ module.exports = {
   getSetting, setSetting, getAllSettings,
   addMemory, getMemory, updateMemory, deleteMemory,
   insertApiKey, listApiKeys, getDecryptedApiKey, getActiveApiKeys, updateApiKey, deleteApiKey, reorderApiKeys,
+  insertVoiceKey, listVoiceKeys, getDecryptedVoiceKey, getActiveVoiceKeys, updateVoiceKey, deleteVoiceKey, reorderVoiceKeys,
   insert, list, update, remove
 };

@@ -144,26 +144,152 @@ function renderChat(container) {
   const stateChip = el('b', {}, 'IDLE');
   const globeStage = el('div', { class: 'globe-stage' });
 
-  const micBtn = el('button', { class: 'call-btn mic-on', id: 'mic-master', title: 'Microphone — ON (click to mute)', onclick: () => {
-    chatState.micOn = !chatState.micOn;
-    micBtn.classList.toggle('mic-on', chatState.micOn);
-    micBtn.title = chatState.micOn ? 'Microphone — ON (click to mute)' : 'Microphone — MUTED (click to unmute)';
-    if (!chatState.micOn && chatState.state === 'listening') applyState('idle');
-    toast(chatState.micOn ? '🎙 Microphone ON — aap bol sakte hain' : '🎙 Microphone MUTED');
-  } }, '🎙');
+  // Voice playback audio tracking & interrupt
+  let currentAudioPlayer = null;
+  let activeMediaRecorder = null;
+  let audioChunks = [];
+
+  function stopSpeaking() {
+    if (currentAudioPlayer) {
+      try {
+        currentAudioPlayer.pause();
+        currentAudioPlayer.currentTime = 0;
+      } catch (e) {}
+      currentAudioPlayer = null;
+    }
+    if ('speechSynthesis' in window) {
+      try { window.speechSynthesis.cancel(); } catch (e) {}
+    }
+    if (chatState.state === 'speaking') {
+      applyState('idle');
+      statusLeft.textContent = 'Speech interrupted';
+    }
+    interruptBtn.style.display = 'none';
+  }
+
+  // Interrupt button
+  const interruptBtn = el('button', {
+    class: 'btn',
+    style: 'display:none;background:#2b1214;border-color:#ff4757;color:#ff4757;font-size:9.5px;padding:3px 8px;margin-left:6px',
+    title: 'Stop speech audio playback',
+    onclick: () => {
+      stopSpeaking();
+      toast('Voice speech interrupted');
+    }
+  }, '■ Stop Voice');
+
+  // Mic capture functions
+  async function startRecording() {
+    stopSpeaking();
+    audioChunks = [];
+
+    try {
+      let voiceSettings = { sttLanguage: 'auto', micDeviceId: 'default' };
+      if (window.jarvis?.settings?.get) {
+        const saved = await window.jarvis.settings.get('voice_settings');
+        if (saved) voiceSettings = { ...voiceSettings, ...saved };
+      }
+
+      const audioConstraints = voiceSettings.micDeviceId && voiceSettings.micDeviceId !== 'default'
+        ? { deviceId: { exact: voiceSettings.micDeviceId } }
+        : true;
+
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+      const mediaRecorder = new MediaRecorder(stream);
+      activeMediaRecorder = mediaRecorder;
+
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) audioChunks.push(e.data);
+      };
+
+      mediaRecorder.onstop = async () => {
+        stream.getTracks().forEach(t => t.stop());
+        if (!audioChunks.length) {
+          applyState('idle');
+          return;
+        }
+
+        applyState('thinking');
+        statusLeft.textContent = 'Transcribing voice input (Cloud STT)…';
+
+        const blob = new Blob(audioChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+        const arrayBuffer = await blob.arrayBuffer();
+
+        try {
+          if (window.jarvis?.voice?.transcribe) {
+            const sttRes = await window.jarvis.voice.transcribe(arrayBuffer, {
+              language: voiceSettings.sttLanguage,
+              mimeType: blob.type
+            });
+
+            if (sttRes && sttRes.text) {
+              const text = sttRes.text.trim();
+              if (text) {
+                toast(`🎙 Transcribed (${sttRes.latencyMs || 0}ms): "${text.slice(0, 35)}…"`);
+                pushMsg({ role: 'user', text });
+                return;
+              }
+            }
+          }
+          statusLeft.textContent = 'No speech detected';
+          applyState('idle');
+        } catch (err) {
+          console.error('STT Transcription error:', err);
+          toast('STT Error: ' + err.message, true);
+          statusLeft.textContent = 'STT error — check Voice API key';
+          applyState('idle');
+        }
+      };
+
+      mediaRecorder.start();
+      chatState.recording = true;
+      micBtn.classList.add('mic-on');
+      applyState('listening');
+      statusLeft.textContent = 'Listening to your voice… (speak now)';
+      toast('🎙 Microphone listening — boliye Boss');
+    } catch (err) {
+      console.error('Microphone access failed:', err);
+      toast('Microphone error: ' + err.message, true);
+      statusLeft.textContent = 'Microphone permission denied / unavailable';
+      applyState('idle');
+    }
+  }
+
+  function stopRecording() {
+    if (activeMediaRecorder && activeMediaRecorder.state !== 'inactive') {
+      activeMediaRecorder.stop();
+      activeMediaRecorder = null;
+    }
+    chatState.recording = false;
+    micBtn.classList.remove('mic-on');
+  }
+
+  const micBtn = el('button', {
+    class: 'call-btn',
+    id: 'mic-master',
+    title: 'Microphone — click to speak / hold to talk',
+    onclick: () => {
+      if (chatState.recording) {
+        stopRecording();
+      } else {
+        startRecording();
+      }
+    }
+  }, '🎙');
+
   const camBtn = el('button', { class: 'call-btn', id: 'cam-master', title: 'Camera — click to open camera feed', onclick: () => {
     openCameraModal();
   } }, '📷');
-  const callBtn = el('button', { class: 'call-btn call-active', id: 'call-master', title: 'Voice session — live with Jarvis (click to end)', onclick: () => {
+
+  const callBtn = el('button', { class: 'call-btn call-active', id: 'call-master', title: 'Voice session — live with Jarvis (click to toggle)', onclick: () => {
     chatState.callLive = !chatState.callLive;
     callBtn.classList.toggle('call-active', chatState.callLive);
     callBtn.innerHTML = chatState.callLive ? '✕' : '✆';
     if (chatState.callLive) {
-      chatState.micOn = true; micBtn.classList.add('mic-on');
-      applyState('listening');
-      toast('✆ Voice session live — boliye Boss');
-      pushMsg({ role: 'user', text: '(voice session started)' });
+      toast('✆ Voice session live — press mic to talk');
     } else {
+      stopSpeaking();
+      if (chatState.recording) stopRecording();
       applyState('idle');
       toast('Voice session ended');
     }
@@ -172,7 +298,10 @@ function renderChat(container) {
   const center = el('div', { class: 'globe-center' },
     el('div', { class: 'globe-top-row' },
       el('span', { class: 'hud-tag' }, '◉ NEURAL HARMONIC CORE'),
-      el('span', { class: 'state-chip' }, 'STATE: ', stateChip)
+      el('div', { style: 'display:flex;align-items:center;gap:6px' },
+        el('span', { class: 'state-chip' }, 'STATE: ', stateChip),
+        interruptBtn
+      )
     ),
     globeStage,
     el('div', { class: 'call-bar' }, camBtn, callBtn, micBtn),
@@ -182,7 +311,10 @@ function renderChat(container) {
         ['thinking', '⌘', 'Thinking'], ['speaking', '≈', 'Speaking']
       ].map(([id, ic, label]) =>
         el('button', { class: 'state-btn' + (id === 'idle' ? ' on' : ''), 'data-state': id,
-          onclick: () => applyState(id) }, el('span', {}, ic), label))
+          onclick: () => {
+            if (id === 'idle') stopSpeaking();
+            applyState(id);
+          } }, el('span', {}, ic), label))
     )
   );
 
@@ -243,21 +375,49 @@ function renderChat(container) {
 
   const activeModelTag = el('span', { class: 'hud-tag gray', id: 'chat-active-model-tag' }, 'Loading Brain…');
 
-  // Load active model tag
-  if (window.jarvis?.brain?.getActiveConfig) {
-    window.jarvis.brain.getActiveConfig().then(cfg => {
-      if (cfg && cfg.model) {
-        const pMeta = typeof getProviderMeta === 'function' ? getProviderMeta(cfg.provider) : { glyph: '✦', name: cfg.provider };
-        activeModelTag.textContent = `${pMeta.glyph} ${pMeta.name} · ${cfg.model}`;
-        activeModelTag.className = 'hud-tag green';
-      } else {
-        activeModelTag.textContent = '○ No Active Key';
-        activeModelTag.className = 'hud-tag gray';
+  // Load active model tag & active voice tag
+  async function refreshActiveTags() {
+    try {
+      let bLabel = '○ No Active Key';
+      let bCls = 'hud-tag gray';
+      if (window.jarvis?.brain?.getActiveConfig) {
+        const cfg = await window.jarvis.brain.getActiveConfig();
+        if (cfg && cfg.model) {
+          const pMeta = typeof getProviderMeta === 'function' ? getProviderMeta(cfg.provider) : { glyph: '✦', name: cfg.provider };
+          bLabel = `${pMeta.glyph} ${cfg.model}`;
+          bCls = 'hud-tag green';
+        }
       }
-    }).catch(() => {
+
+      let vLabel = '';
+      if (window.jarvis?.voice?.getActiveConfig) {
+        const vCfg = await window.jarvis.voice.getActiveConfig();
+        if (vCfg && vCfg.tts) {
+          const vMeta = typeof getVoiceProviderMeta === 'function' ? getVoiceProviderMeta(vCfg.tts.provider) : { glyph: '♫' };
+          vLabel = ` | ${vMeta.glyph} ${vCfg.tts.voice || vCfg.tts.provider}`;
+        }
+      }
+
+      activeModelTag.textContent = bLabel + vLabel;
+      activeModelTag.className = bCls;
+    } catch (e) {
       activeModelTag.textContent = '○ Brain Standby';
-    });
+    }
   }
+  refreshActiveTags();
+
+  const composerMicBtn = el('button', {
+    class: 'call-btn',
+    style: 'width:38px;height:38px;font-size:14px',
+    title: 'Voice input — click to speak',
+    onclick: () => {
+      if (chatState.recording) {
+        stopRecording();
+      } else {
+        startRecording();
+      }
+    }
+  }, '🎙');
 
   const right = el('div', { class: 'transcript-col' },
     el('div', { class: 'transcript-card' },
@@ -265,19 +425,8 @@ function renderChat(container) {
         el('span', {}, '◉ TRANSCRIPT'),
         activeModelTag),
       scroll,
-      el('div', { class: 'composer' }, input, el('button', { class: 'call-btn', style: 'width:38px;height:38px;font-size:14px', title: 'Voice input — dictation (mock)', onclick: (e) => {
-        const btn = e.currentTarget;
-        if (btn.classList.contains('mic-on')) return;
-        btn.classList.add('mic-on');
-        applyState('listening');
-        setTimeout(() => {
-          input.value = 'Jarvis, kal ki meeting ka follow-up check karo';
-          btn.classList.remove('mic-on');
-          if (chatState.state === 'listening') applyState('idle');
-          doSend();
-        }, 2400);
-      } }, '🎙'), sendBtn),
-      el('div', { class: 'status-line' }, statusLeft, el('span', {}, 'v1.0.1'))
+      el('div', { class: 'composer' }, input, composerMicBtn, sendBtn),
+      el('div', { class: 'status-line' }, statusLeft, el('span', {}, 'v1.2.0 — CLOUD VOICE ACTIVE'))
     )
   );
 
@@ -291,7 +440,63 @@ function renderChat(container) {
     if (m.role === 'user') jarvisRespond();
   }
 
+  // Speak assistant response through Cloud TTS
+  async function speakResponse(text) {
+    if (!text || !text.trim()) return;
+    const cleanText = text.replace(/<[^>]*>?/gm, '').replace(/[*_#`~]/g, '').trim();
+    if (!cleanText) return;
+
+    try {
+      let voiceSettings = { ttsSpeed: 1.0, ttsVolume: 100 };
+      if (window.jarvis?.settings?.get) {
+        const saved = await window.jarvis.settings.get('voice_settings');
+        if (saved) voiceSettings = { ...voiceSettings, ...saved };
+      }
+
+      if (window.jarvis?.voice?.synthesize) {
+        const ttsRes = await window.jarvis.voice.synthesize(cleanText, {
+          speed: voiceSettings.ttsSpeed,
+          volume: voiceSettings.ttsVolume
+        });
+
+        if (ttsRes && ttsRes.audioBase64) {
+          stopSpeaking();
+          applyState('speaking');
+          statusLeft.textContent = 'Jarvis is speaking (Cloud TTS)…';
+          interruptBtn.style.display = 'inline-block';
+
+          const audio = new Audio('data:' + (ttsRes.mimeType || 'audio/mpeg') + ';base64,' + ttsRes.audioBase64);
+          audio.playbackRate = voiceSettings.ttsSpeed || 1.0;
+          audio.volume = (voiceSettings.ttsVolume || 100) / 100;
+          currentAudioPlayer = audio;
+
+          audio.onended = () => {
+            currentAudioPlayer = null;
+            interruptBtn.style.display = 'none';
+            if (chatState.state === 'speaking') {
+              applyState('idle');
+              statusLeft.textContent = 'Standing by for command';
+            }
+          };
+
+          audio.onerror = (e) => {
+            console.warn('Audio playback error:', e);
+            currentAudioPlayer = null;
+            interruptBtn.style.display = 'none';
+            if (chatState.state === 'speaking') applyState('idle');
+          };
+
+          await audio.play();
+        }
+      }
+    } catch (err) {
+      console.warn('Speech synthesis skipped/fallback:', err.message);
+      interruptBtn.style.display = 'none';
+    }
+  }
+
   async function jarvisRespond() {
+    stopSpeaking();
     chatState.busy = true;
     setGlobeState('thinking');
     document.querySelectorAll('.state-btn').forEach(b => b.classList.toggle('on', b.dataset.state === 'thinking'));
@@ -327,7 +532,7 @@ function renderChat(container) {
               hasChunk = true;
               typingMsg.typing = false;
               setGlobeState('speaking');
-              statusLeft.textContent = 'Jarvis is speaking…';
+              statusLeft.textContent = 'Jarvis is responding…';
             }
             typingMsg.text += chunk;
             renderMsgs(scroll);
@@ -343,6 +548,11 @@ function renderChat(container) {
         }
         if (res && res.model) {
           typingMsg.tag = `${res.provider || 'Brain'} · ${res.model}`;
+        }
+
+        // Voice playback trigger
+        if (typingMsg.text) {
+          speakResponse(typingMsg.text);
         }
       } else {
         // Fallback if bridge is not available
@@ -362,9 +572,11 @@ function renderChat(container) {
       toast('Brain API Error: ' + errMsg, true);
     } finally {
       chatState.busy = false;
-      setGlobeState('idle');
-      statusLeft.textContent = 'Standing by for command';
-      document.querySelectorAll('.state-btn').forEach(b => b.classList.toggle('on', b.dataset.state === 'idle'));
+      if (chatState.state !== 'speaking') {
+        setGlobeState('idle');
+        statusLeft.textContent = 'Standing by for command';
+        document.querySelectorAll('.state-btn').forEach(b => b.classList.toggle('on', b.dataset.state === 'idle'));
+      }
       renderMsgs(scroll);
     }
   }
@@ -1139,112 +1351,796 @@ async function renderBrain(container) {
   );
 }
 
-/* ═══════════════════════════════════ 5. VOICE API ═══════════════════════════════════ */
+/* ═══════════════════════════════════ 5. VOICE API — CLOUD STT & TTS ═══════════════════════════════════ */
 
-function makeKeyCard(k, prov, opts = {}) {
-  const quota = k.quota || 100000;
-  const used = k.used || 0;
-  const pct = Math.min(100, Math.round((used / quota) * 100));
-  const fillCls = pct > 75 ? 'fill red' : pct > 50 ? 'fill amber' : 'fill';
-  const card = el('div', { class: 'key-card' + (k.first ? ' first' : '') },
+const VOICE_PROVIDERS_LIST = [
+  { id: 'gemini', name: 'Google AI (Gemini)', badge: 'TTS + STT', desc: 'Gemini Audio Synthesis & Transcription', glyph: '✦', color: '#4da6ff', supportsTTS: true, supportsSTT: true },
+  { id: 'elevenlabs', name: 'ElevenLabs', badge: 'TTS SPECIALIST', desc: 'Hyper-realistic emotional human voices', glyph: '♫', color: '#a855f7', supportsTTS: true, supportsSTT: false },
+  { id: 'openai', name: 'OpenAI', badge: 'TTS + STT', desc: 'TTS-1 / TTS-1-HD & Whisper Transcription', glyph: '❋', color: '#10a37f', supportsTTS: true, supportsSTT: true },
+  { id: 'groq', name: 'Groq Cloud', badge: 'FASTEST STT', desc: 'Whisper Large v3 Ultra-fast Speech-to-Text', glyph: '⚡', color: '#f59e0b', supportsTTS: false, supportsSTT: true },
+  { id: 'custom', name: 'Custom Voice Endpoint', badge: 'CUSTOM / LOCAL', desc: 'OpenAI-compatible speech & whisper servers', glyph: '⚙', color: '#94a3b8', supportsTTS: true, supportsSTT: true }
+];
+
+function getVoiceProviderMeta(id) {
+  const clean = (id || '').toLowerCase();
+  return VOICE_PROVIDERS_LIST.find(p => p.id === clean) || {
+    id: clean,
+    name: id || 'Voice Provider',
+    badge: 'VOICE API',
+    desc: 'Cloud Speech Provider',
+    glyph: '♪',
+    color: '#2ee6a8',
+    supportsTTS: true,
+    supportsSTT: true
+  };
+}
+
+function makeVoiceKeyCard(k, opts = {}) {
+  const meta = getVoiceProviderMeta(k.provider);
+  const used = k.quota_used || 0;
+  const isActive = Boolean(k.is_active);
+
+  const card = el('div', { class: 'key-card' + (isActive ? ' active' : '') },
     el('div', { class: 'key-head' },
-      opts.draggable ? el('span', { class: 'drag-handle', draggable: 'true' }, '⋮⋮') : null,
-      el('span', { class: 'conn-ic', style: 'width:30px;height:30px;font-size:13px' }, (typeof PROVIDER_GLYPHS !== 'undefined' && PROVIDER_GLYPHS[prov]) || '◈'),
-      el('div', { style: 'flex:1' },
-        el('div', { class: 'key-name' }, k.label || 'API Key'),
-        el('div', { class: 'key-val' }, k.val || '••••••••')
+      opts.draggable ? el('span', { class: 'drag-handle', draggable: 'true', title: 'Drag to change priority' }, '⋮⋮') : null,
+      el('span', { class: 'conn-ic', style: `width:32px;height:32px;font-size:14px;color:${meta.color}` }, meta.glyph),
+      el('div', { style: 'flex:1;min-width:0' },
+        el('div', { style: 'display:flex;align-items:center;gap:8px;flex-wrap:wrap' },
+          el('span', { class: 'key-name' }, k.key_name || (meta.name + ' Voice')),
+          k.selected_voice ? el('span', { class: 'model-pill', title: 'TTS Voice' }, '♫ ' + k.selected_voice) : null,
+          k.selected_model ? el('span', { class: 'model-pill', title: 'Audio Model' }, '⚡ ' + k.selected_model) : null,
+          el('span', { class: 'badge gray', style: 'font-size:8px' }, meta.badge),
+          k.priority ? el('span', { class: 'badge gray', style: 'font-size:8.5px' }, '#' + k.priority) : null
+        ),
+        el('div', { class: 'key-val', style: 'font-size:10px;margin-top:2px' }, k.masked_key || '••••••••••••••••')
       ),
-      k.first ? el('span', { class: 'badge green' }, '● ACTIVE NOW') : el('span', { class: 'badge gray' }, 'STANDBY')
+      isActive
+        ? el('span', { class: 'badge green' }, '● ACTIVE NOW')
+        : el('button', { class: 'btn', style: 'padding:3px 8px;font-size:9px', onclick: opts.onActivate }, 'ACTIVATE')
     ),
     el('div', { class: 'usage-row' },
-      el('span', {}, 'QUOTA'),
-      el('div', { class: 'track' }, el('div', { class: fillCls, style: 'width:' + pct + '%' })),
-      el('span', {}, pct + '%')
+      el('span', {}, 'USAGE'),
+      el('span', { class: 'usage-num' }, used + ' speech units processed • ' + (k.last_used ? new Date(k.last_used).toLocaleTimeString() : 'Never used'))
     ),
-    el('div', { class: 'key-foot' },
-      el('span', { class: 'key-meta' }, k.model || (prov + ' engine')),
-      el('div', { style: 'display:flex;gap:6px' },
-        el('button', { class: 'btn small', onclick: () => toast('Testing voice key… ping OK (182ms)') }, 'TEST'),
-        el('button', { class: 'btn small danger', onclick: () => confirmModal('Delete Key?', (k.label || 'This key') + ' will be removed.', () => toast('Key deleted')) }, 'DEL')
-      )
+    el('div', { style: 'display:flex;align-items:center;justify-content:space-between;margin-top:4px' },
+      el('div', { style: 'display:flex;gap:6px;align-items:center' },
+        el('span', { class: 'badge ' + (k.status === 'valid' ? 'green' : 'red'), style: 'font-size:8.5px' },
+          k.status === 'valid' ? '✓ VERIFIED' : '✕ INVALID'
+        ),
+        el('button', { class: 'btn small', style: 'font-size:8.5px;padding:2px 8px', onclick: opts.onTest }, '▶ PLAY TEST')
+      ),
+      opts.removable ? el('button', { class: 'icon-btn del', title: 'Remove key from voice vault', onclick: opts.removable }, '✕') : null
     )
   );
   return card;
 }
 
-function renderVoice(container) {
+async function renderVoice(container) {
+  container.innerHTML = '<div class="panel" style="display:flex;align-items:center;justify-content:center;padding:40px"><span class="spin">◌</span> <span style="margin-left:10px;font-size:11px;color:var(--muted)">Loading Voice API vault & speech engines…</span></div>';
+
+  let currentKeys = [];
+  try {
+    if (window.jarvis?.voice?.getKeys) {
+      currentKeys = await window.jarvis.voice.getKeys();
+    }
+  } catch (err) {
+    console.error('Failed to load keys from voice manager:', err);
+  }
+
   container.innerHTML = '';
-  const provSel = el('select', { class: 'select', style: 'width:220px' },
-    ...VOICE_PROVIDERS.map(p => el('option', {}, p.name)), el('option', {}, 'Custom Provider…'));
-  const keyInput = el('input', { class: 'input', placeholder: 'Paste voice API key…' });
-  const addStatus = el('div');
 
-  const chainRow = el('div', { style: 'display:flex;align-items:center;gap:10px;flex-wrap:wrap' });
-  [
-    ['green', 'KEY #1'], ['gray', 'KEY #2'], ['gray', 'ELEVENLABS'], ['gray', 'GOOGLE TTS'],
-    ['amber', 'EDGE TTS (ASAD)']
-  ].forEach(([cls, txt], i) => {
-    if (i) chainRow.appendChild(el('span', { class: 'chain-arrow' }, '→'));
-    chainRow.appendChild(el('span', { class: 'badge ' + cls }, txt));
-  });
+  // 1. Fallback Chain Visualization
+  const chainRow = el('div', { class: 'chain-row' });
+  function updateVoiceChainUI() {
+    chainRow.innerHTML = '';
+    if (!currentKeys.length) {
+      chainRow.appendChild(el('span', { class: 'badge red' }, '⚠ NO VOICE KEYS CONFIGURED — ADD CLOUD VOICE BELOW'));
+      return;
+    }
+    currentKeys.forEach((k, i) => {
+      if (i > 0) chainRow.appendChild(el('span', { class: 'chain-arrow' }, '→'));
+      const meta = getVoiceProviderMeta(k.provider);
+      const isAct = Boolean(k.is_active);
+      const label = (k.selected_voice || k.selected_model || meta.name);
+      chainRow.appendChild(el('span', { class: 'badge ' + (isAct ? 'green' : 'gray'), title: label },
+        (i + 1) + '. ' + meta.glyph + ' ' + (k.key_name || meta.name) + (isAct ? ' (ACTIVE)' : '')
+      ));
+    });
+    chainRow.appendChild(el('span', { class: 'chain-arrow' }, '→'));
+    chainRow.appendChild(el('span', { class: 'badge red' }, '⚠ ALL FAILED = SILENT / TEXT ONLY'));
+  }
+  updateVoiceChainUI();
 
+  // 2. Saved Voice Keys List
   const keysWrap = el('div', { class: 'conn-grid' });
-  VOICE_PROVIDERS.forEach(p => p.keys.forEach((k, ki) => {
-    k.first = (p === VOICE_PROVIDERS[0] && ki === 0);
-    keysWrap.appendChild(makeKeyCard(k, p.name, {}));
-  }));
+  function updateVoiceKeysUI() {
+    keysWrap.innerHTML = '';
+    if (!currentKeys.length) {
+      keysWrap.appendChild(el('div', { class: 'empty', style: 'padding:30px 20px;background:#080a08;border:1px dashed var(--line);border-radius:10px' },
+        el('div', { class: 'e-ic' }, '♫'),
+        el('div', { class: 'e-tx', style: 'text-align:center' }, 'NO CLOUD VOICE KEYS CONFIGURED YET<br><span style="font-size:9px;color:var(--muted2);text-transform:none">Follow the 9-step verified flow below to connect Google AI (Gemini), ElevenLabs, OpenAI, Groq (Whisper) or Custom endpoint.</span>')
+      ));
+      return;
+    }
 
-  const voicesWrap = el('div', { class: 'conn-grid' });
-  VOICES.forEach(v => {
-    voicesWrap.appendChild(el('div', { class: 'conn-card' },
-      el('div', { class: 'conn-ic' }, '♫'),
-      el('div', { class: 'conn-info' },
-        el('div', { class: 'conn-name' }, v.name),
-        el('div', { class: 'conn-sub' }, v.prov + ' • ' + v.accent)
-      ),
-      el('button', { class: 'btn small', onclick: () => toast('Preview playing: ' + v.name + ' — "Boss, system ready hai."') }, '▶ PREVIEW'),
-      el('span', { class: 'badge ' + (v.name.startsWith('Asad') ? 'green' : 'gray') }, v.name.startsWith('Asad') ? '● FALLBACK VOICE' : 'SELECT')
-    ));
+    currentKeys.forEach((k) => {
+      const card = makeVoiceKeyCard(k, {
+        draggable: true,
+        onActivate: async () => {
+          try {
+            await window.jarvis.voice.setActiveKey(k.id);
+            currentKeys = await window.jarvis.voice.getKeys();
+            updateVoiceKeysUI();
+            updateVoiceChainUI();
+            toast('Active voice provider switched to ' + (k.key_name || k.provider));
+          } catch (err) {
+            toast('Failed to set active voice key: ' + err.message, true);
+          }
+        },
+        onTest: async () => {
+          toast('🔊 Testing voice "' + (k.selected_voice || k.selected_model || 'default') + '"…');
+          try {
+            const res = await window.jarvis.voice.synthesize('Salam, main Jarvis hoon. Voice system operational hai.', {
+              voice: k.selected_voice,
+              model: k.selected_model
+            });
+            if (res && res.audioBase64) {
+              const audio = new Audio('data:' + (res.mimeType || 'audio/mpeg') + ';base64,' + res.audioBase64);
+              audio.play().catch(e => console.warn('Audio play error:', e));
+              toast('✓ Audio test played successfully (' + (res.latencyMs || 0) + 'ms)');
+            } else {
+              toast('✓ Voice test signal verified (' + (res.latencyMs || 0) + 'ms)');
+            }
+          } catch (err) {
+            toast('✕ Voice test failed: ' + err.message, true);
+          }
+        },
+        removable: () => {
+          confirmModal('Remove Voice Key?', (k.key_name || 'This key') + ' will be removed from your encrypted voice vault and fallback chain.', async () => {
+            try {
+              currentKeys = await window.jarvis.voice.deleteKey(k.id);
+              updateVoiceKeysUI();
+              updateVoiceChainUI();
+              toast('Voice key removed from vault');
+            } catch (err) {
+              toast('Failed to delete key: ' + err.message, true);
+            }
+          });
+        }
+      });
+
+      // Drag & Drop reordering
+      const handle = card.querySelector('.drag-handle');
+      if (handle) {
+        handle.addEventListener('dragstart', (e) => {
+          e.dataTransfer.setData('text/plain', String(k.id));
+        });
+        card.addEventListener('dragover', (e) => e.preventDefault());
+        card.addEventListener('drop', async (e) => {
+          e.preventDefault();
+          const draggedId = Number(e.dataTransfer.getData('text/plain'));
+          if (!draggedId || draggedId === k.id) return;
+          const oldIdx = currentKeys.findIndex(item => item.id == draggedId);
+          const newIdx = currentKeys.findIndex(item => item.id == k.id);
+          if (oldIdx === -1 || newIdx === -1) return;
+
+          const reordered = [...currentKeys];
+          const [moved] = reordered.splice(oldIdx, 1);
+          reordered.splice(newIdx, 0, moved);
+
+          try {
+            const newIds = reordered.map(item => item.id);
+            currentKeys = await window.jarvis.voice.reorderKeys(newIds);
+            updateVoiceKeysUI();
+            updateVoiceChainUI();
+            toast('Voice priority chain updated — #' + (newIdx + 1) + ' is now ' + (moved.key_name || moved.provider));
+          } catch (err) {
+            toast('Reorder failed: ' + err.message, true);
+          }
+        });
+      }
+
+      keysWrap.appendChild(card);
+    });
+  }
+  updateVoiceKeysUI();
+
+  // ═══════════════════════════════════════════════════════════════
+  // 9-STEP ADD VOICE KEY FLOW BUILDER
+  // ═══════════════════════════════════════════════════════════════
+  const flowBox = el('div', { class: 'flow-box' });
+
+  let flowState = {
+    provider: 'gemini',
+    keyName: '',
+    rawKey: '',
+    customEndpoint: '',
+    showKey: false,
+    isValidated: false,
+    validating: false,
+    voices: [],
+    loadingVoices: false,
+    selectedVoice: '',
+    models: [],
+    loadingModels: false,
+    selectedModel: '',
+    tested: false,
+    testing: false,
+    saving: false,
+    statusText: '',
+    statusType: ''
+  };
+
+  // Step 1: Provider Dropdown
+  const provSelect = el('select', { class: 'select', style: 'width:240px' },
+    ...VOICE_PROVIDERS_LIST.map(p => el('option', { value: p.id }, p.glyph + ' ' + p.name + ' [' + p.badge + ']'))
+  );
+
+  // Existing Gemini Key Quick-Fill Bar (For Google AI)
+  const existingGeminiBar = el('div', {
+    style: 'display:none;background:rgba(77,166,255,0.08);border:1px solid rgba(77,166,255,0.3);border-radius:8px;padding:9px 13px;margin:8px 0;align-items:center;justify-content:space-between;gap:10px'
   });
 
-  const addBtn = el('button', { class: 'btn primary', onclick: () => {
-    if (keyInput.value.trim().length < 8) { addStatus.innerHTML = '<div class="form-err">✕ Invalid voice key.</div>'; return; }
-    addStatus.innerHTML = '<div class="form-ok">◌ Validating…</div>';
-    setTimeout(() => {
-      addStatus.innerHTML = '<div class="form-ok">✓ Voice key validated & added.</div>';
-      keyInput.value = '';
-      toast('Voice provider key added');
-    }, 900);
-  }}, 'ADD VOICE KEY');
+  async function checkExistingGeminiKey() {
+    if (flowState.provider !== 'gemini') {
+      existingGeminiBar.style.display = 'none';
+      return;
+    }
+    try {
+      if (window.jarvis?.voice?.getExistingGeminiKey) {
+        const gem = await window.jarvis.voice.getExistingGeminiKey();
+        if (gem && gem.available) {
+          existingGeminiBar.style.display = 'flex';
+          existingGeminiBar.innerHTML = '';
+          existingGeminiBar.append(
+            el('div', { style: 'font-size:10px;color:#a8d1ff' },
+              el('span', { style: 'font-weight:700' }, '✦ Existing Gemini Key found in Brain API: '),
+              el('span', { style: 'font-family:var(--font-mono)' }, gem.keyName + ' (' + gem.maskedKey + ')')
+            ),
+            el('button', {
+              class: 'btn',
+              style: 'background:#142840;border-color:#4da6ff;color:#4da6ff;font-size:9.5px;padding:4px 10px',
+              onclick: () => {
+                rawKeyInput.value = gem.rawKey;
+                flowState.rawKey = gem.rawKey;
+                keyLabelInput.value = (gem.keyName || 'Gemini') + ' Voice';
+                existingGeminiBar.style.display = 'none';
+                toast('Existing Gemini key applied — click "Verify Voice Key"');
+                validateBtn.click();
+              }
+            }, '✨ Use Existing Gemini Key')
+          );
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn('Gemini check error:', e);
+    }
+    existingGeminiBar.style.display = 'none';
+  }
 
+  // Step 2: Key Label & Input
+  const keyLabelInput = el('input', {
+    class: 'input',
+    style: 'width:190px',
+    placeholder: 'Key Label (e.g. ElevenLabs Ultra)'
+  });
+
+  const rawKeyInput = el('input', {
+    class: 'input',
+    type: 'password',
+    style: 'flex:1;min-width:260px;font-family:var(--font-mono)',
+    placeholder: 'Paste Voice API key (e.g. AIza…, xi-…, sk-…, gsk_…)'
+  });
+
+  const customEndpointInput = el('input', {
+    class: 'input',
+    style: 'display:none;width:100%;margin-top:8px;font-family:var(--font-mono)',
+    placeholder: 'Custom Base URL (e.g. http://localhost:8000/v1 or https://my-tts-server.com)'
+  });
+
+  customEndpointInput.addEventListener('input', () => {
+    flowState.customEndpoint = customEndpointInput.value.trim();
+  });
+
+  const toggleEyeBtn = el('button', {
+    class: 'btn',
+    style: 'padding:8px 12px;font-size:11px',
+    title: 'Toggle key visibility'
+  }, '👁 Show');
+
+  toggleEyeBtn.onclick = () => {
+    flowState.showKey = !flowState.showKey;
+    rawKeyInput.type = flowState.showKey ? 'text' : 'password';
+    toggleEyeBtn.textContent = flowState.showKey ? '🔒 Hide' : '👁 Show';
+  };
+
+  // Step 3: Pattern Warning Container
+  const patternWarningBanner = el('div', { class: 'pattern-warn-banner', style: 'display:none' });
+
+  // Step 4: Validate Button
+  const validateBtn = el('button', { class: 'btn primary', style: 'min-width:150px' }, '🔍 1. VERIFY VOICE KEY');
+
+  // Step 5 & 6: Live Voices & Models Selection UI
+  const discoverySection = el('div', { style: 'margin-top:14px;padding-top:14px;border-top:1px solid var(--line2);display:none' });
+  const voiceSelect = el('select', { class: 'select', style: 'flex:1;min-width:200px' });
+  const modelSelect = el('select', { class: 'select', style: 'flex:1;min-width:200px' });
+  const refreshVoicesBtn = el('button', { class: 'btn', title: 'Live refresh voices from provider endpoint' }, '⟳ Refresh Voices/Models');
+
+  // Step 7: Test Voice Call Button (actually plays real audio)
+  const testVoiceBtn = el('button', { class: 'btn', style: 'min-width:150px;background:#1a231b;border-color:var(--mint);color:var(--mint)' }, '🔊 2. TEST VOICE PLAYBACK');
+
+  // Step 8: Save Key Button
+  const saveVoiceKeyBtn = el('button', { class: 'btn primary', style: 'min-width:160px;background:var(--mint);color:#000;display:none' }, '💾 3. SAVE TO VOICE VAULT');
+
+  // Status message container
+  const flowStatusMsg = el('div', { class: 'step-result-msg', style: 'display:none' });
+
+  function setStatus(text, type = 'info') {
+    flowState.statusText = text;
+    flowState.statusType = type;
+    if (!text) {
+      flowStatusMsg.style.display = 'none';
+      return;
+    }
+    flowStatusMsg.style.display = 'block';
+    flowStatusMsg.className = 'step-result-msg ' + (type === 'ok' ? 'ok' : type === 'err' ? 'err' : 'spin');
+    flowStatusMsg.innerHTML = text;
+  }
+
+  // Check key pattern mismatch (Step 3)
+  async function checkKeyPattern() {
+    const key = rawKeyInput.value.trim();
+    flowState.rawKey = key;
+    if (key.length < 5) {
+      patternWarningBanner.style.display = 'none';
+      return;
+    }
+
+    try {
+      if (window.jarvis?.voice?.detectMismatch) {
+        const res = await window.jarvis.voice.detectMismatch(flowState.provider, key);
+        if (res && res.mismatch) {
+          patternWarningBanner.style.display = 'flex';
+          patternWarningBanner.innerHTML = '';
+          patternWarningBanner.append(
+            el('div', {}, `⚠️ ${res.message || 'Key pattern belongs to ' + res.detected}`),
+            el('button', {
+              class: 'btn',
+              onclick: () => {
+                const target = VOICE_PROVIDERS_LIST.find(p => p.name.toLowerCase().includes(res.detected.toLowerCase().split(' ')[0]));
+                if (target) {
+                  provSelect.value = target.id;
+                  flowState.provider = target.id;
+                  patternWarningBanner.style.display = 'none';
+                  toast('Switched voice provider to ' + target.name);
+                  checkExistingGeminiKey();
+                }
+              }
+            }, `Switch to ${res.detected}`)
+          );
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn('Voice pattern check error:', e);
+    }
+    patternWarningBanner.style.display = 'none';
+  }
+
+  rawKeyInput.addEventListener('input', checkKeyPattern);
+
+  provSelect.addEventListener('change', () => {
+    flowState.provider = provSelect.value;
+    flowState.isValidated = false;
+    flowState.tested = false;
+    flowState.voices = [];
+    flowState.models = [];
+    flowState.selectedVoice = '';
+    flowState.selectedModel = '';
+    discoverySection.style.display = 'none';
+    saveVoiceKeyBtn.style.display = 'none';
+    customEndpointInput.style.display = flowState.provider === 'custom' ? 'block' : 'none';
+    setStatus('');
+    checkExistingGeminiKey();
+    checkKeyPattern();
+  });
+
+  // Step 4: Handle Live Validation
+  validateBtn.onclick = async () => {
+    const key = rawKeyInput.value.trim();
+    if (key.length < 5) {
+      setStatus('✕ Voice key too short — please enter a valid key.', 'err');
+      return;
+    }
+    flowState.rawKey = key;
+    flowState.validating = true;
+    validateBtn.disabled = true;
+    validateBtn.textContent = '◌ VERIFYING…';
+    setStatus('<span class="spin">◌</span> Voice key verify ho rahi hai official provider endpoint se…', 'spin');
+
+    try {
+      const res = await window.jarvis.voice.validateKey(flowState.provider, key, flowState.customEndpoint);
+      if (res && res.valid) {
+        flowState.isValidated = true;
+        setStatus('✓ Key valid hai ✅ (Live speech provider handshake succeeded). Fetching voices & models…', 'ok');
+        await fetchLiveVoicesAndModels(false);
+      } else {
+        flowState.isValidated = false;
+        discoverySection.style.display = 'none';
+        saveVoiceKeyBtn.style.display = 'none';
+        setStatus('✕ Voice key invalid hai — dobara check karein: ' + (res?.error || 'Authentication rejected'), 'err');
+      }
+    } catch (err) {
+      flowState.isValidated = false;
+      discoverySection.style.display = 'none';
+      saveVoiceKeyBtn.style.display = 'none';
+      setStatus('✕ Network / Verification error: ' + err.message, 'err');
+    } finally {
+      flowState.validating = false;
+      validateBtn.disabled = false;
+      validateBtn.textContent = '🔍 1. VERIFY VOICE KEY';
+    }
+  };
+
+  // Step 5 & 6: Live Voices & Models Fetch
+  async function fetchLiveVoicesAndModels(forceRefresh = false) {
+    flowState.loadingVoices = true;
+    refreshVoicesBtn.disabled = true;
+    refreshVoicesBtn.textContent = '◌ Fetching…';
+    setStatus('<span class="spin">◌</span> Live voices & models fetch ho rahi hain (zero hardcoded list)…', 'spin');
+
+    const meta = getVoiceProviderMeta(flowState.provider);
+
+    try {
+      // Fetch voices if provider supports TTS
+      if (meta.supportsTTS) {
+        const vRes = await window.jarvis.voice.fetchVoices(flowState.provider, flowState.rawKey, flowState.customEndpoint, forceRefresh);
+        flowState.voices = vRes?.voices || [];
+        voiceSelect.innerHTML = '';
+        flowState.voices.forEach(v => {
+          voiceSelect.appendChild(el('option', { value: v.id }, '♫ ' + (v.name || v.id) + (v.gender ? ` (${v.gender})` : '')));
+        });
+        if (flowState.voices.length) {
+          flowState.selectedVoice = flowState.voices[0].id;
+        }
+      }
+
+      // Fetch models if provider exposes models
+      const mRes = await window.jarvis.voice.fetchModels(flowState.provider, flowState.rawKey, flowState.customEndpoint, forceRefresh);
+      flowState.models = mRes?.models || [];
+      modelSelect.innerHTML = '';
+      flowState.models.forEach(m => {
+        modelSelect.appendChild(el('option', { value: m.id }, '⚡ ' + (m.name || m.id)));
+      });
+      if (flowState.models.length) {
+        flowState.selectedModel = flowState.models[0].id;
+      }
+
+      discoverySection.style.display = 'block';
+      setStatus(`✓ Discovered ${flowState.voices.length} live voices and ${flowState.models.length} models! Run test call to hear audio sample.`, 'ok');
+    } catch (err) {
+      setStatus('✕ Failed to fetch voices/models: ' + err.message, 'err');
+    } finally {
+      flowState.loadingVoices = false;
+      refreshVoicesBtn.disabled = false;
+      refreshVoicesBtn.textContent = '⟳ Refresh Voices/Models';
+    }
+  }
+
+  refreshVoicesBtn.onclick = () => fetchLiveVoicesAndModels(true);
+
+  voiceSelect.addEventListener('change', () => {
+    flowState.selectedVoice = voiceSelect.value;
+    flowState.tested = false;
+    saveVoiceKeyBtn.style.display = 'none';
+    setStatus('Voice changed to <b>' + flowState.selectedVoice + '</b>. Run test call to verify audio playback.', 'spin');
+  });
+
+  modelSelect.addEventListener('change', () => {
+    flowState.selectedModel = modelSelect.value;
+    flowState.tested = false;
+    saveVoiceKeyBtn.style.display = 'none';
+    setStatus('Model changed to <b>' + flowState.selectedModel + '</b>. Run test call to verify.', 'spin');
+  });
+
+  // Step 7: Test Voice Call (MANDATORY TEST: Generates tiny audio & plays it)
+  testVoiceBtn.onclick = async () => {
+    flowState.testing = true;
+    testVoiceBtn.disabled = true;
+    testVoiceBtn.textContent = '◌ PLAYING SAMPLE…';
+    setStatus('<span class="spin">◌</span> Generating & playing test audio ("Salam, main Jarvis hoon")…', 'spin');
+
+    try {
+      const res = await window.jarvis.voice.testVoice(
+        flowState.provider,
+        flowState.rawKey,
+        flowState.selectedVoice,
+        flowState.selectedModel,
+        flowState.customEndpoint
+      );
+
+      if (res && res.success) {
+        if (res.audioBase64) {
+          const audio = new Audio('data:' + (res.mimeType || 'audio/mpeg') + ';base64,' + res.audioBase64);
+          audio.play().catch(e => console.warn('Test audio play error:', e));
+        }
+        flowState.tested = true;
+        saveVoiceKeyBtn.style.display = 'inline-flex';
+        setStatus('✓ Voice test ho gayi ✅ Audio played successfully (' + (res.latencyMs || 0) + 'ms). Ready to save to encrypted vault!', 'ok');
+        toast('✓ Voice audio test passed (' + (res.latencyMs || 0) + 'ms)');
+      } else {
+        flowState.tested = false;
+        saveVoiceKeyBtn.style.display = 'none';
+        setStatus('✕ Voice test failed: ' + (res?.error || 'No audio generated') + ' — Please select another voice or model.', 'err');
+      }
+    } catch (err) {
+      flowState.tested = false;
+      saveVoiceKeyBtn.style.display = 'none';
+      setStatus('✕ Test call error: ' + err.message, 'err');
+    } finally {
+      flowState.testing = false;
+      testVoiceBtn.disabled = false;
+      testVoiceBtn.textContent = '🔊 2. TEST VOICE PLAYBACK';
+    }
+  };
+
+  // Step 8: Save Key & Activate in Vault
+  saveVoiceKeyBtn.onclick = async () => {
+    if (!flowState.isValidated || !flowState.tested) {
+      setStatus('Cannot save: Key must be verified and pass audio playback test first.', 'err');
+      return;
+    }
+
+    flowState.saving = true;
+    saveVoiceKeyBtn.disabled = true;
+    saveVoiceKeyBtn.textContent = '◌ SAVING…';
+    setStatus('<span class="spin">◌</span> Encrypting voice key with AES-256-GCM and saving into SQLite vault…', 'spin');
+
+    const meta = getVoiceProviderMeta(flowState.provider);
+    const keyLabel = (keyLabelInput.value.trim()) || `${meta.name} Voice Key ${currentKeys.length + 1}`;
+
+    try {
+      await window.jarvis.voice.saveKey({
+        provider: flowState.provider,
+        keyName: keyLabel,
+        rawKey: flowState.rawKey,
+        selectedVoice: flowState.selectedVoice,
+        selectedModel: flowState.selectedModel,
+        customEndpoint: flowState.customEndpoint
+      });
+
+      toast(`✓ ${keyLabel} successfully saved into voice vault!`);
+      setStatus('✓ Voice key saved & activated in fallback priority chain!', 'ok');
+
+      // Reset form
+      rawKeyInput.value = '';
+      keyLabelInput.value = '';
+      customEndpointInput.value = '';
+      flowState.rawKey = '';
+      flowState.isValidated = false;
+      flowState.tested = false;
+      discoverySection.style.display = 'none';
+      saveVoiceKeyBtn.style.display = 'none';
+
+      // Reload keys from database
+      currentKeys = await window.jarvis.voice.getKeys();
+      updateVoiceKeysUI();
+      updateVoiceChainUI();
+    } catch (err) {
+      setStatus('✕ Save failed: ' + err.message, 'err');
+      toast('Save failed: ' + err.message, true);
+    } finally {
+      flowState.saving = false;
+      saveVoiceKeyBtn.disabled = false;
+      saveVoiceKeyBtn.textContent = '💾 3. SAVE TO VOICE VAULT';
+    }
+  };
+
+  // Assemble Discovery / Selection Section
+  discoverySection.append(
+    el('div', { class: 'form-label' },
+      el('span', { class: 'step-num-badge' }, '2'),
+      'LIVE DISCOVERED VOICES (TTS) & MODELS (STT/TTS) — MANDATORY PLAY TEST'
+    ),
+    el('div', { style: 'display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px' },
+      voiceSelect,
+      modelSelect,
+      refreshVoicesBtn,
+      testVoiceBtn,
+      saveVoiceKeyBtn
+    )
+  );
+
+  // Assemble Flow Box
+  flowBox.append(
+    el('div', { class: 'flow-step-header' },
+      el('div', { class: 'panel-title', style: 'font-size:12.5px' },
+        el('span', { class: 'pt-ic' }, '+'),
+        'ADD CLOUD VOICE KEY — 9-STEP VERIFIED FLOW (TTS & STT)'
+      ),
+      el('span', { class: 'badge gray', style: 'font-size:8.5px' }, 'MANDATORY AUDIO TEST BEFORE SAVE')
+    ),
+    el('div', { style: 'font-size:9.5px;color:var(--muted);margin-bottom:12px;line-height:1.5' },
+      'Live validation performs real-time handshake with the provider. Discovered voices and models are fetched dynamically without hardcoding. A mandatory test generates real speech before AES-256-GCM encrypted persistence.'
+    ),
+    existingGeminiBar,
+    el('div', { class: 'filter-row' },
+      el('div', { style: 'display:flex;flex-direction:column;gap:4px' },
+        el('span', { class: 'form-label' }, el('span', { class: 'step-num-badge' }, '1'), 'PROVIDER'),
+        provSelect
+      ),
+      el('div', { style: 'display:flex;flex-direction:column;gap:4px' },
+        el('span', { class: 'form-label' }, 'LABEL'),
+        keyLabelInput
+      ),
+      el('div', { style: 'display:flex;flex-direction:column;gap:4px;flex:1;min-width:280px' },
+        el('span', { class: 'form-label' }, 'VOICE API KEY'),
+        el('div', { style: 'display:flex;gap:6px' }, rawKeyInput, toggleEyeBtn)
+      ),
+      el('div', { style: 'align-self:flex-end' }, validateBtn)
+    ),
+    customEndpointInput,
+    patternWarningBanner,
+    discoverySection,
+    flowStatusMsg
+  );
+
+  // ═══════════════════════════════════════════════════════════════
+  // VOICE SETTINGS PANEL (Speed, Volume, Language, Mic device)
+  // ═══════════════════════════════════════════════════════════════
+  let currentSettings = {
+    ttsSpeed: 1.0,
+    ttsVolume: 100,
+    sttLanguage: 'auto',
+    pushToTalk: false,
+    micDeviceId: 'default'
+  };
+
+  try {
+    if (window.jarvis?.settings?.get) {
+      const saved = await window.jarvis.settings.get('voice_settings');
+      if (saved) currentSettings = { ...currentSettings, ...saved };
+    }
+  } catch (e) {
+    console.warn('Voice settings load fallback:', e);
+  }
+
+  const speedVal = el('span', { style: 'font-weight:700;color:var(--mint)' }, currentSettings.ttsSpeed + 'x');
+  const speedSlider = el('input', {
+    type: 'range',
+    min: '0.5',
+    max: '2.0',
+    step: '0.1',
+    value: String(currentSettings.ttsSpeed),
+    style: 'flex:1'
+  });
+  speedSlider.oninput = () => {
+    speedVal.textContent = speedSlider.value + 'x';
+    saveVoiceSettings();
+  };
+
+  const volVal = el('span', { style: 'font-weight:700;color:var(--mint)' }, currentSettings.ttsVolume + '%');
+  const volSlider = el('input', {
+    type: 'range',
+    min: '10',
+    max: '100',
+    step: '5',
+    value: String(currentSettings.ttsVolume),
+    style: 'flex:1'
+  });
+  volSlider.oninput = () => {
+    volVal.textContent = volSlider.value + '%';
+    saveVoiceSettings();
+  };
+
+  const langSelect = el('select', { class: 'select', style: 'width:200px' },
+    el('option', { value: 'auto' }, '🌐 Auto-detect (Urdu + English)'),
+    el('option', { value: 'ur' }, '🇵🇰 Urdu (اردو) Priority'),
+    el('option', { value: 'en' }, '🇬🇧 English Priority'),
+    el('option', { value: 'hinglish' }, '🗣 Roman Urdu / Hinglish')
+  );
+  langSelect.value = currentSettings.sttLanguage || 'auto';
+  langSelect.onchange = saveVoiceSettings;
+
+  const modeSelect = el('select', { class: 'select', style: 'width:200px' },
+    el('option', { value: 'toggle' }, '🎙 Click to Record / Toggle'),
+    el('option', { value: 'push' }, '⌨ Push-to-Talk (Hold Space)')
+  );
+  modeSelect.value = currentSettings.pushToTalk ? 'push' : 'toggle';
+  modeSelect.onchange = saveVoiceSettings;
+
+  const micSelect = el('select', { class: 'select', style: 'flex:1;min-width:240px' },
+    el('option', { value: 'default' }, '🎤 Default System Microphone')
+  );
+
+  // Populate mic devices
+  if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
+    navigator.mediaDevices.enumerateDevices().then(devices => {
+      const audioInputs = devices.filter(d => d.kind === 'audioinput');
+      if (audioInputs.length) {
+        micSelect.innerHTML = '';
+        audioInputs.forEach((d, idx) => {
+          micSelect.appendChild(el('option', { value: d.deviceId }, '🎤 ' + (d.label || `Microphone ${idx + 1}`)));
+        });
+        if (currentSettings.micDeviceId) micSelect.value = currentSettings.micDeviceId;
+      }
+    }).catch(err => console.warn('Mic enumeration error:', err));
+  }
+  micSelect.onchange = saveVoiceSettings;
+
+  async function saveVoiceSettings() {
+    const payload = {
+      ttsSpeed: parseFloat(speedSlider.value) || 1.0,
+      ttsVolume: parseInt(volSlider.value, 10) || 100,
+      sttLanguage: langSelect.value,
+      pushToTalk: modeSelect.value === 'push',
+      micDeviceId: micSelect.value
+    };
+    currentSettings = payload;
+    try {
+      if (window.jarvis?.settings?.set) {
+        await window.jarvis.settings.set('voice_settings', payload);
+      }
+    } catch (e) {
+      console.warn('Voice settings save fallback:', e);
+    }
+  }
+
+  const settingsPanel = el('div', { class: 'panel mt14', style: 'background:#060806' },
+    el('div', { class: 'panel-head' },
+      el('div', { class: 'panel-title' }, el('span', { class: 'pt-ic' }, '⚙'), 'VOICE & AUDIO SETTINGS'),
+      el('span', { class: 'badge green' }, '● REALTIME SYNCHRONIZED')
+    ),
+    el('div', { class: 'two-col', style: 'gap:14px' },
+      el('div', { style: 'background:#0a0c0a;padding:12px;border-radius:8px;border:1px solid var(--line2)' },
+        el('div', { class: 'form-label', style: 'margin-bottom:8px' }, 'TTS SPEECH SPEED: ', speedVal),
+        el('div', { style: 'display:flex;align-items:center;gap:10px' },
+          el('span', { style: 'font-size:10px;color:var(--muted)' }, '0.5x'),
+          speedSlider,
+          el('span', { style: 'font-size:10px;color:var(--muted)' }, '2.0x')
+        ),
+        el('div', { class: 'form-label', style: 'margin:14px 0 8px' }, 'TTS PLAYBACK VOLUME: ', volVal),
+        el('div', { style: 'display:flex;align-items:center;gap:10px' },
+          el('span', { style: 'font-size:10px;color:var(--muted)' }, '10%'),
+          volSlider,
+          el('span', { style: 'font-size:10px;color:var(--muted)' }, '100%')
+        )
+      ),
+      el('div', { style: 'background:#0a0c0a;padding:12px;border-radius:8px;border:1px solid var(--line2);display:flex;flex-direction:column;gap:10px' },
+        el('div', {},
+          el('div', { class: 'form-label', style: 'margin-bottom:4px' }, 'SPEECH-TO-TEXT LANGUAGE PRIORITY'),
+          langSelect
+        ),
+        el('div', {},
+          el('div', { class: 'form-label', style: 'margin-bottom:4px' }, 'MICROPHONE CAPTURE MODE'),
+          modeSelect
+        ),
+        el('div', {},
+          el('div', { class: 'form-label', style: 'margin-bottom:4px' }, 'ACTIVE INPUT DEVICE'),
+          micSelect
+        )
+      )
+    )
+  );
+
+  // Check Gemini on mount
+  checkExistingGeminiKey();
+
+  // Assemble Main Voice Tab Panel
   container.append(
     el('div', { class: 'panel' },
       el('div', { class: 'panel-head' },
-        el('div', { class: 'panel-title' }, el('span', { class: 'pt-ic' }, '♪'), 'VOICE API — TTS KEYS'),
-        el('span', { class: 'badge green' }, '● CHAIN: ACTIVE')
+        el('div', { class: 'panel-title' }, el('span', { class: 'pt-ic' }, '♪'), 'VOICE API — CLOUD STT & TTS ENGINES'),
+        el('span', { class: 'badge green' }, '● PRIORITY CHAIN: ACTIVE')
       ),
-      el('div', { class: 'form-row' }, el('div', { class: 'form-label' }, '◈ FALLBACK CHAIN'), chainRow),
+      el('div', { class: 'form-row' },
+        el('div', { class: 'form-label' }, '◈ SPEECH FALLBACK CHAIN (drag ⋮⋮ to reorder fallback sequence)'),
+        chainRow
+      ),
       keysWrap,
-      el('div', { class: 'panel mt14', style: 'background:#050705' },
-        el('div', { class: 'panel-title', style: 'margin-bottom:12px' }, el('span', { class: 'pt-ic' }, '+'), 'ADD VOICE PROVIDER KEY'),
-        el('div', { class: 'filter-row' }, provSel, keyInput, addBtn),
-        addStatus
-      )
-    ),
-    el('div', { class: 'panel' },
-      el('div', { class: 'panel-head' },
-        el('div', { class: 'panel-title' }, el('span', { class: 'pt-ic' }, '♫'), 'VOICE LIBRARY'),
-        el('span', { class: 'badge gray' }, 'EDGE TTS = FREE FALLBACK')
-      ),
-      voicesWrap,
-      el('div', { class: 'panel mt14', style: 'background:#050705;display:flex;align-items:center;gap:12px' },
-        el('span', { class: 'conn-ic' }, '◍'),
-        el('div', { style: 'flex:1' },
-          el('div', { class: 'conn-name' }, 'Edge TTS (Asad)'),
-          el('div', { class: 'conn-sub' }, 'Last-resort free fallback — never fails, zero cost, Urdu + English')
-        ),
-        el('span', { class: 'badge green' }, '● ALWAYS AVAILABLE')
-      )
+      flowBox,
+      settingsPanel
     )
   );
 }
