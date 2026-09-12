@@ -15,6 +15,86 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
     super('gemini', 'Google AI (Gemini)', { tts: true, stt: true, live: true });
     this.baseUrl = 'https://generativelanguage.googleapis.com/v1beta';
     this.alphaUrl = 'https://generativelanguage.googleapis.com/v1alpha';
+    // 24-hour cache for probed audio-input modality capability: Map<`${keyPrefix}_${model}`, { capable: boolean, testedAt: number }>
+    this.audioInputCapabilityCache = new Map();
+  }
+
+  /**
+   * Generates a 100ms 16kHz 16-bit mono silent WAV for capability probing.
+   */
+  getSilentWavBase64() {
+    const numSamples = 1600; // 100ms at 16kHz
+    const pcmData = Buffer.alloc(numSamples * 2, 0); // zeros
+    const wavBuf = this.pcmToWav(pcmData, 16000, 1, 16);
+    return wavBuf.toString('base64');
+  }
+
+  /**
+   * Dynamically probes whether a Gemini model accepts audio input modality in generateContent.
+   * Caches result per key + model for 24 hours.
+   */
+  async probeAudioInputCapability(key, model) {
+    if (!key || !model) return false;
+    const cleanKey = String(key).trim();
+    const cleanModel = this.sanitizeModel(model);
+    const cacheKey = `${cleanKey.slice(0, 12)}_${cleanModel.toLowerCase()}`;
+
+    const cached = this.audioInputCapabilityCache.get(cacheKey);
+    const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+    if (cached && (Date.now() - cached.testedAt < ONE_DAY_MS)) {
+      return cached.capable;
+    }
+
+    // Models known strictly as WebSocket Live/Bidi only do NOT support REST audio input
+    const lower = cleanModel.toLowerCase();
+    if (lower.includes('native-audio') || lower.includes('bidi-only') || lower.includes('realtime')) {
+      this.audioInputCapabilityCache.set(cacheKey, { capable: false, testedAt: Date.now() });
+      return false;
+    }
+
+    const testWavBase64 = this.getSilentWavBase64();
+    const url = `${this.baseUrl}/models/${cleanModel}:generateContent?key=${encodeURIComponent(cleanKey)}`;
+    const payload = {
+      contents: [{
+        role: 'user',
+        parts: [
+          { text: 'test probe' },
+          { inlineData: { mimeType: 'audio/wav', data: testWavBase64 } }
+        ]
+      }]
+    };
+
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (res.ok) {
+        this.audioInputCapabilityCache.set(cacheKey, { capable: true, testedAt: Date.now() });
+        return true;
+      }
+
+      const errText = await res.text().catch(() => '');
+      if (errText.includes('Audio input modality is not enabled') ||
+          errText.includes('modality is not enabled') ||
+          errText.includes('does not support audio input') ||
+          errText.includes('INVALID_ARGUMENT')) {
+        console.log(`[Gemini Voice Adapter] Probe: Model "${cleanModel}" does NOT support audio input modality.`);
+        this.audioInputCapabilityCache.set(cacheKey, { capable: false, testedAt: Date.now() });
+        return false;
+      }
+
+      // If error is unrelated to modality (e.g. rate limit, quota, empty prompt), we check if it's a known multimodal family
+      const isMultimodalFamily = lower.includes('flash') || lower.includes('pro') || lower.includes('2.0') || lower.includes('2.5') || lower.includes('1.5');
+      this.audioInputCapabilityCache.set(cacheKey, { capable: isMultimodalFamily, testedAt: Date.now() });
+      return isMultimodalFamily;
+    } catch (e) {
+      console.warn(`[Gemini Voice Adapter] Probe request error for "${cleanModel}":`, e.message);
+      const isMultimodalFamily = lower.includes('flash') || lower.includes('pro') || lower.includes('2.0') || lower.includes('2.5') || lower.includes('1.5');
+      return isMultimodalFamily;
+    }
   }
 
   async validateKey(key) {
@@ -130,13 +210,33 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
 
       if (category === 'stt') {
         // STT requires models capable of understanding multimodal audio input
+        // Models with native-audio or bidi-only cannot be used for REST generateContent STT
+        if (id.includes('native-audio') || id.includes('bidi-only')) return false;
         return methods.includes('generateContent') && (isAudioFlash || id.includes('pro') || id.includes('1.5'));
       }
 
       return true;
     });
 
-    const models = filtered.map(m => {
+    // If STT category requested, perform capability probe to ensure only audio-input-capable models are returned
+    let finalFiltered = filtered;
+    if (category === 'stt') {
+      const probeResults = await Promise.all(filtered.map(async (m) => {
+        const cleanId = (m.name || '').replace(/^(models\/)+/i, '').trim();
+        const capable = await this.probeAudioInputCapability(cleanKey, cleanId);
+        return capable ? m : null;
+      }));
+      finalFiltered = probeResults.filter(Boolean);
+      // If probe filtered everything out due to network glitch, keep best candidates with warning
+      if (finalFiltered.length === 0 && filtered.length > 0) {
+        finalFiltered = filtered.filter(m => {
+          const id = (m.name || '').toLowerCase();
+          return !id.includes('native-audio') && (id.includes('flash') || id.includes('pro'));
+        });
+      }
+    }
+
+    const models = finalFiltered.map(m => {
       const cleanId = (m.name || '').replace(/^(models\/)+/i, '').trim();
       const methods = m.supportedGenerationMethods || [];
       const isLiveCapable = methods.includes('bidiGenerateContent') || cleanId.includes('realtime') || cleanId.includes('native-audio');
@@ -329,7 +429,7 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
           setup: {
             model: `models/${cleanModel}`,
             generationConfig: {
-              responseModalities: ['AUDIO', 'TEXT'],
+              responseModalities: ['AUDIO'],
               speechConfig: {
                 voiceConfig: {
                   prebuiltVoiceConfig: {
@@ -342,7 +442,9 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
               parts: [{
                 text: 'You are JARVIS. Say a brief 4-word greeting to test voice playback.'
               }]
-            }
+            },
+            inputAudioTranscription: {},
+            outputAudioTranscription: {}
           }
         };
 
@@ -408,7 +510,8 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
       ws.onclose = (closeEvent) => {
         clearTimeout(timeoutId);
         if (closeEvent.code !== 1000 && !turnCompleted && audioChunks.length === 0) {
-          finishError(`Google AI (Gemini Live) WebSocket closed (Code ${closeEvent.code}): ${closeEvent.reason || 'Unexpected closure'}`);
+          const reasonMsg = closeEvent.reason || (closeEvent.code === 1007 ? 'Response modalities rejected (Code 1007)' : 'Unexpected closure');
+          finishError(`Google AI (Gemini Live) WebSocket closed (Code ${closeEvent.code}): ${reasonMsg}`);
         } else if (audioChunks.length > 0) {
           finishSuccess();
         }
@@ -492,10 +595,18 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
     const t0 = Date.now();
     const cleanKey = String(key).trim();
     let useModel = model ? this.sanitizeModel(model) : null;
-    if (!useModel) {
-      const models = await this.fetchModels(cleanKey, { category: 'stt' }).catch(() => []);
-      const flash = models.find(m => m.id.includes('flash') || m.id.includes('2.0') || m.id.includes('2.5'));
-      useModel = flash ? flash.id : (models[0]?.id || 'gemini-2.0-flash');
+
+    // Check if requested model supports audio input modality
+    let isCapable = useModel ? await this.probeAudioInputCapability(cleanKey, useModel) : false;
+    if (!useModel || !isCapable) {
+      console.log(`[Gemini STT] Model "${useModel || 'default'}" is not audio-input capable. Selecting probed STT model...`);
+      const sttModels = await this.fetchModels(cleanKey, { category: 'stt' }).catch(() => []);
+      if (sttModels.length > 0) {
+        useModel = sttModels[0].id;
+        console.log(`[Gemini STT] Automatically selected audio-input capable model: "${useModel}"`);
+      } else {
+        useModel = 'gemini-2.0-flash';
+      }
     }
 
     // Unpack audio buffer
@@ -514,17 +625,23 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
       throw new Error('Captured audio buffer is empty (0 bytes)');
     }
 
-    // Detect actual MIME type from magic bytes
+    // Detect actual MIME type from magic bytes or wrap raw PCM into valid WAV
     let detectedMime = options.mimeType || 'audio/wav';
+    let processedBuffer = rawBuffer;
+
     if (rawBuffer.length >= 4 && rawBuffer.toString('ascii', 0, 4) === 'RIFF') {
       detectedMime = 'audio/wav';
     } else if (rawBuffer.length >= 4 && rawBuffer[0] === 0x1A && rawBuffer[1] === 0x45 && rawBuffer[2] === 0xDF && rawBuffer[3] === 0xA3) {
       detectedMime = 'audio/webm';
     } else if (rawBuffer.length >= 3 && rawBuffer.toString('ascii', 0, 3) === 'ID3') {
       detectedMime = 'audio/mp3';
+    } else {
+      // Raw PCM bytes -> wrap into canonical 16kHz mono 16-bit WAV header for 100% reliable ingestion
+      processedBuffer = this.pcmToWav(rawBuffer, 16000, 1, 16);
+      detectedMime = 'audio/wav';
     }
 
-    const base64Audio = rawBuffer.toString('base64');
+    const base64Audio = processedBuffer.toString('base64');
     const lang = options.language || 'auto';
     const langInstruction = lang === 'ur'
       ? 'The speaker is speaking Urdu or Roman Urdu. Transcribe verbatim in Roman Urdu or Urdu script.'
@@ -532,69 +649,85 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
       ? 'The speaker is speaking English. Transcribe verbatim in English.'
       : 'Transcribe verbatim in whichever language is spoken (Urdu, Roman Urdu, or English).';
 
-    const url = `${this.baseUrl}/models/${useModel}:generateContent?key=${encodeURIComponent(cleanKey)}`;
-    const payload = {
-      contents: [{
-        role: 'user',
-        parts: [
-          {
-            text: `Transcribe the speech in this audio recording verbatim. ${langInstruction} Return ONLY the transcription text. Do not add any commentary, explanations, disclaimers, notes, quotes, or timestamps. If no speech is audible, return an empty string.`
-          },
-          {
-            inlineData: {
-              mimeType: detectedMime,
-              data: base64Audio
+    const executeRequest = async (targetModel) => {
+      const url = `${this.baseUrl}/models/${targetModel}:generateContent?key=${encodeURIComponent(cleanKey)}`;
+      const payload = {
+        contents: [{
+          role: 'user',
+          parts: [
+            {
+              text: `Transcribe the speech in this audio recording verbatim. ${langInstruction} Return ONLY the transcription text. Do not add any commentary, explanations, disclaimers, notes, quotes, or timestamps. If no speech is audible, return an empty string.`
+            },
+            {
+              inlineData: {
+                mimeType: detectedMime,
+                data: base64Audio
+              }
             }
-          }
-        ]
-      }]
+          ]
+        }]
+      };
+
+      console.log(`[Voice STT -> Gemini] Requesting transcription with model: ${targetModel} | Buffer: ${processedBuffer.length} bytes | MIME: ${detectedMime}`);
+      this.logPreRequest('POST', url, { 'Content-Type': 'application/json' });
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000);
+
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+
+        if (!res.ok) {
+          const err = await this.parseError(res, { url, model: targetModel });
+          throw err;
+        }
+
+        const data = await res.json();
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
+        return text;
+      } catch (err) {
+        clearTimeout(timeoutId);
+        throw err;
+      }
     };
 
-    console.log(`[Voice STT -> Gemini] Requesting transcription:`);
-    console.log(`  Model: ${useModel}`);
-    console.log(`  Audio Buffer: ${rawBuffer.length} bytes | MIME: ${detectedMime}`);
-    console.log(`  Endpoint: ${this.maskUrl(url)}`);
-
-    this.logPreRequest('POST', url, { 'Content-Type': 'application/json' });
-
-    // Request with 15s timeout
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000);
-
-    let res;
+    let textResult = '';
     try {
-      res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: controller.signal
-      });
-    } catch (netErr) {
-      clearTimeout(timeoutId);
-      if (netErr.name === 'AbortError') {
-        throw new Error(`Gemini STT request timed out after 15 seconds (Endpoint: ${this.maskUrl(url)})`);
+      textResult = await executeRequest(useModel);
+    } catch (err) {
+      if (err.message && (err.message.includes('Audio input modality is not enabled') || err.message.includes('modality is not enabled'))) {
+        console.warn(`[Gemini STT] Model "${useModel}" failed audio modality check. Invalidating cache and retrying with fallback...`);
+        const cacheKey = `${cleanKey.slice(0, 12)}_${useModel.toLowerCase()}`;
+        this.audioInputCapabilityCache.set(cacheKey, { capable: false, testedAt: Date.now() });
+
+        const sttModels = await this.fetchModels(cleanKey, { category: 'stt' }).catch(() => []);
+        const fallback = sttModels.find(m => m.id !== useModel);
+        if (fallback) {
+          console.log(`[Gemini STT] Retrying transcription with fallback model "${fallback.id}"...`);
+          useModel = fallback.id;
+          textResult = await executeRequest(useModel);
+        } else {
+          throw new Error('Google AI (Gemini) error: None of the models available for this API key support audio input modality in generateContent. Please configure a Groq Whisper key or use an audio-capable Gemini key.');
+        }
+      } else {
+        throw err;
       }
-      throw new Error(`Gemini STT network failure: ${netErr.message}`);
-    } finally {
-      clearTimeout(timeoutId);
     }
 
-    if (!res.ok) {
-      const err = await this.parseError(res, { url, model: useModel });
-      console.error(`[Voice STT -> Gemini] Provider error:`, err);
-      throw new Error(err.message);
-    }
-
-    const data = await res.json();
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
     const latencyMs = Date.now() - t0;
-
-    console.log(`[Voice STT -> Gemini] Completed in ${latencyMs}ms | Transcribed: "${text.slice(0, 60)}${text.length > 60 ? '...' : ''}"`);
+    console.log(`[Voice STT -> Gemini] Completed in ${latencyMs}ms | Transcribed: "${textResult.slice(0, 60)}${textResult.length > 60 ? '...' : ''}"`);
 
     return {
-      text,
+      text: textResult,
       language: lang,
-      latencyMs
+      latencyMs,
+      modelUsed: useModel
     };
   }
 

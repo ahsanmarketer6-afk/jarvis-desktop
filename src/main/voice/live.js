@@ -116,7 +116,7 @@ class GeminiLiveSessionManager extends EventEmitter {
           setup: {
             model: `models/${cleanModel}`,
             generationConfig: {
-              responseModalities: ['AUDIO', 'TEXT'],
+              responseModalities: ['AUDIO'],
               speechConfig: {
                 voiceConfig: {
                   prebuiltVoiceConfig: {
@@ -129,7 +129,9 @@ class GeminiLiveSessionManager extends EventEmitter {
               parts: [{
                 text: defaultPrompt
               }]
-            }
+            },
+            inputAudioTranscription: {},
+            outputAudioTranscription: {}
           }
         };
 
@@ -252,7 +254,7 @@ class GeminiLiveSessionManager extends EventEmitter {
               data: part.inlineData.data
             });
           }
-          // Text Transcript Part
+          // Text Transcript Part (if provided directly)
           if (part.text) {
             this.currentTurnTranscript += part.text;
             this.windowSender.send('voice:live:text', {
@@ -261,6 +263,25 @@ class GeminiLiveSessionManager extends EventEmitter {
             });
           }
         }
+      }
+
+      // 2b. Output Audio Transcription (built-in live transcription for native audio)
+      const outputTranscription = data.serverContent?.outputAudioTranscription?.text || data.serverContent?.outputTranscription?.text;
+      if (outputTranscription) {
+        this.currentTurnTranscript += outputTranscription;
+        this.windowSender.send('voice:live:text', {
+          text: outputTranscription,
+          isModel: true
+        });
+      }
+
+      // 2c. Input Audio Transcription (user's spoken words in real time)
+      const inputTranscription = data.serverContent?.inputAudioTranscription?.text || data.serverContent?.inputTranscription?.text;
+      if (inputTranscription) {
+        this.windowSender.send('voice:live:text', {
+          text: inputTranscription,
+          isUser: true
+        });
       }
 
       // 3. Turn Complete: save utterance to DB activity & vault memory

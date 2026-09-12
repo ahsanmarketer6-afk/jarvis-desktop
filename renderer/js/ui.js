@@ -293,12 +293,13 @@ function renderChat(container) {
 
     window.jarvis.voice.live.onText((data) => {
       if (data && data.text) {
-        // Append or stream text to transcript
+        // Append or stream text to live transcript in Chat view
+        const role = data.isUser ? 'user' : 'jarvis';
         const lastMsg = chatState.messages[chatState.messages.length - 1];
-        if (lastMsg && lastMsg.role === 'jarvis' && lastMsg._live) {
+        if (lastMsg && lastMsg.role === role && lastMsg._live) {
           lastMsg.text += data.text;
         } else {
-          chatState.messages.push({ role: 'jarvis', text: data.text, _live: true });
+          chatState.messages.push({ role, text: data.text, _live: true });
         }
         renderMsgs(scroll);
       }
