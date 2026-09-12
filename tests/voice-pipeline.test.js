@@ -566,6 +566,24 @@ async function main() {
     await VoiceManager.updateKeyModelVoice({ id: 1, selectedModel: 'gemini-live-2.5-flash-native-audio', selectedVoice: 'Puck' });
   }
 
+  console.log('\n════════ T15. Chat reply spoken by the LIVE model (clientContent TTS) ════════');
+  {
+    const a = new GeminiVoiceAdapter();
+    // Saved model is Live-only: synthesize must use the Live WebSocket session
+    // (generous native-audio quota) instead of burning the tiny REST TTS quota.
+    const res = await a.synthesize(KEY, 'Puck', 'Boss, yeh live session se bol raha hoon.', { model: 'gemini-live-2.5-flash-native-audio' });
+    ok('T15a live-model synthesize returns audio via Live session',
+      res.audioBase64 && res.viaLiveSession === true && res.model === 'gemini-live-2.5-flash-native-audio',
+      JSON.stringify({ via: res.viaLiveSession, model: res.model, bytes: (res.audioBase64 || '').length }).slice(0, 120));
+    ok('T15b reply audio is valid WAV (PCM wrapped)',
+      Buffer.from(res.audioBase64, 'base64').slice(0, 4).toString('ascii') === 'RIFF');
+
+    // Session must be closed after the short-lived TTS turn
+    await new Promise(r => setTimeout(r, 100));
+    const live2 = require(path.join(ROOT, 'src/main/voice/live'));
+    ok('T15c short-lived session cleaned up after reply', live2.getStatus().active === false);
+  }
+
   console.log('\n════════════════════════════════════════');
   console.log(`RESULTS: ${passCount} passed, ${failCount} failed`);
   if (failures.length) {

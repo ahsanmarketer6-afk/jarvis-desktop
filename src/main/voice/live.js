@@ -73,11 +73,13 @@ class GeminiLiveSessionManager extends EventEmitter {
   /**
    * Starts a new Gemini Live WebSocket session.
    */
-  async startSession({ apiKey, model, voice = 'Puck', systemInstruction = null, windowSender = null }) {
+  async startSession({ apiKey, model, voice = 'Puck', systemInstruction = null, windowSender = null, shortLived = false }) {
     this.isManualStop = false;
     this.retryCount = 0;
     this.windowSender = windowSender;
     this.currentTurnTranscript = '';
+    this.shortLived = Boolean(shortLived);
+    this.shortLived = Boolean(shortLived);
 
     if (this.ws) {
       await this.stopSession();
@@ -107,7 +109,7 @@ class GeminiLiveSessionManager extends EventEmitter {
       throw new Error('No active Live API capable model found for this Gemini key. Please select a Live model from the UI.');
     }
 
-    this.sessionConfig = { model: cleanModel, voice, apiKey: cleanKey, systemInstruction };
+    this.sessionConfig = { model: cleanModel, voice, apiKey: cleanKey, systemInstruction, shortLived: this.shortLived };
 
     return this.connectWebSocket();
   }
@@ -333,11 +335,19 @@ class GeminiLiveSessionManager extends EventEmitter {
   }
 
   /**
+   * Safe window send: short-lived TTS sessions have no window — events must
+   * still flow to emitter listeners (synthesizeViaLiveSession collects audio).
+   */
+  safeSend(channel, payload) {
+    if (this.windowSender && !this.windowSender.isDestroyed()) {
+      this.windowSender.send(channel, payload);
+    }
+  }
+
+  /**
    * Handles incoming WebSocket messages from Gemini Live server.
    */
   handleIncomingMessage(rawData) {
-    if (!this.windowSender || this.windowSender.isDestroyed()) return;
-
     try {
       const text = typeof rawData === 'string' ? rawData : (rawData instanceof Buffer ? rawData.toString('utf8') : '');
       if (!text) return;
@@ -348,7 +358,8 @@ class GeminiLiveSessionManager extends EventEmitter {
       if (data.error) {
         const msg = data.error.message || JSON.stringify(data.error);
         console.error('[Gemini Live API] Server error:', msg);
-        this.windowSender.send('voice:live:error', { error: msg });
+        this.emit('live:error', { error: msg });
+        this.safeSend('voice:live:error', { error: msg });
         return;
       }
 
@@ -356,7 +367,7 @@ class GeminiLiveSessionManager extends EventEmitter {
       if (data.serverContent?.interrupted) {
         console.log('[Gemini Live API] User interrupted model speech -> broadcasting interrupt');
         this.currentTurnTranscript = '';
-        this.windowSender.send('voice:live:interrupted');
+        this.safeSend('voice:live:interrupted');
       }
 
       // 2. Extract model turn audio chunks & text transcripts
@@ -365,7 +376,8 @@ class GeminiLiveSessionManager extends EventEmitter {
         for (const part of modelTurn.parts) {
           // Audio Part (PCM 24kHz)
           if (part.inlineData && part.inlineData.data) {
-            this.windowSender.send('voice:live:audio', {
+            this.emit('live:audio', { mimeType: part.inlineData.mimeType || 'audio/pcm;rate=24000', data: part.inlineData.data });
+            this.safeSend('voice:live:audio', {
               mimeType: part.inlineData.mimeType || 'audio/pcm;rate=24000',
               data: part.inlineData.data
             });
@@ -373,7 +385,7 @@ class GeminiLiveSessionManager extends EventEmitter {
           // Text Transcript Part (if provided directly)
           if (part.text) {
             this.currentTurnTranscript += part.text;
-            this.windowSender.send('voice:live:text', {
+            this.safeSend('voice:live:text', {
               text: part.text,
               isModel: true
             });
@@ -385,7 +397,7 @@ class GeminiLiveSessionManager extends EventEmitter {
       const outputTranscription = data.serverContent?.outputAudioTranscription?.text || data.serverContent?.outputTranscription?.text;
       if (outputTranscription) {
         this.currentTurnTranscript += outputTranscription;
-        this.windowSender.send('voice:live:text', {
+        this.safeSend('voice:live:text', {
           text: outputTranscription,
           isModel: true
         });
@@ -394,7 +406,7 @@ class GeminiLiveSessionManager extends EventEmitter {
       // 2c. Input Audio Transcription (user's spoken words in real time)
       const inputTranscription = data.serverContent?.inputAudioTranscription?.text || data.serverContent?.inputTranscription?.text;
       if (inputTranscription) {
-        this.windowSender.send('voice:live:text', {
+        this.safeSend('voice:live:text', {
           text: inputTranscription,
           isUser: true
         });
@@ -407,11 +419,39 @@ class GeminiLiveSessionManager extends EventEmitter {
           db.logActivity('Gemini Live', `Jarvis Live Reply: "${finalUtterance.slice(0, 60)}${finalUtterance.length > 60 ? '...' : ''}"`, null, 'success');
           this.currentTurnTranscript = '';
         }
-        this.windowSender.send('voice:live:turnComplete');
+        this.emit('live:turnComplete');
+        this.safeSend('voice:live:turnComplete');
       }
 
     } catch (err) {
       console.error('[Gemini Live API] Error parsing incoming message:', err);
+    }
+  }
+
+  /**
+   * Turn-based text send (clientContent): used by synthesizeViaLiveSession so a
+   * chat reply can be spoken by the SAME Live model/voice over its own quota.
+   * Session must be setup-complete; if a conversation session is active the
+   * reply also plays in the app window (same behavior as spoken mic turns).
+   */
+  sendClientText(text) {
+    if (!this.ws || !this.isOpen) {
+      return { success: false, error: 'Live session is not connected' };
+    }
+    if (!this.setupComplete) {
+      return { success: false, error: 'Live session setup not complete yet' };
+    }
+    try {
+      const payload = {
+        clientContent: {
+          turns: [{ role: 'user', parts: [{ text: String(text) }] }],
+          turnComplete: true
+        }
+      };
+      this.ws.send(JSON.stringify(payload));
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err.message };
     }
   }
 

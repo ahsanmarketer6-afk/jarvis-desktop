@@ -929,6 +929,19 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
     }
     model = this.sanitizeModel(model);
 
+    // Live/native-audio models speak over their OWN generous free-tier quota via the
+    // BidiGenerateContent WebSocket — one clientContent turn + reply audio. This avoids
+    // burning the tiny dedicated-TTS quota (10/min) every time the saved model is a
+    // Live model, and honors the user's exact model+voice selection.
+    if (this.isLiveModel(model) && !options.skipLiveSession) {
+      try {
+        return await this.synthesizeViaLiveSession(cleanKey, voice, text, model, t0);
+      } catch (liveErr) {
+        console.warn(`[Gemini Voice Adapter] Live-session TTS failed ("${String(liveErr.message).slice(0, 120)}") — falling back to REST TTS models.`);
+        // continue to REST fallback below
+      }
+    }
+
     try {
       const result = await this.synthesizeViaRest(cleanKey, voice, text, model, t0);
       return result;
@@ -1059,6 +1072,88 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
       mimeType,
       latencyMs: Date.now() - t0
     };
+  }
+
+  /**
+   * Speaks `text` through the current Live WebSocket session using clientContent
+   * (turn-based), or opens a short-lived Live session on the SAME model+voice if none
+   * is active. Uses the Live model's own quota instead of the tiny REST TTS quota.
+   */
+  async synthesizeViaLiveSession(cleanKey, voice, text, model, t0) {
+    const liveSession = require('../live');
+    const collected = [];
+    let done = false;
+    let turnError = null;
+
+    const onAudio = (data) => { if (data && data.data) collected.push(data.data); };
+    const onErr = (payload) => { turnError = payload && payload.error; };
+
+    const attach = () => {
+      liveSession.on('live:audio', onAudio);
+      liveSession.on('live:error', onErr);
+    };
+    const detach = () => {
+      liveSession.off('live:audio', onAudio);
+      liveSession.off('live:error', onErr);
+    };
+
+    try {
+      const status = liveSession.getStatus();
+      if (!status.active || !status.setupComplete) {
+        // No live conversation running: open a short-lived session on the SAME model+voice.
+        await liveSession.startSession({ apiKey: cleanKey, model, voice, shortLived: true });
+      } else if (status.config && (status.config.model !== model || status.config.voice !== voice)) {
+        throw new Error(`Active Live session is on model "${status.config.model}"/voice "${status.config.voice}" — requested "${model}"/"${voice}".`);
+      }
+
+      attach();
+      const sendRes = liveSession.sendClientText(text);
+      if (!sendRes || !sendRes.success) {
+        throw new Error('Live session text send failed: ' + ((sendRes && sendRes.error) || 'unknown'));
+      }
+
+      // Wait for the spoken reply (turn audio + completion), bounded at 25s.
+      await new Promise((resolve, reject) => {
+        const timeoutId = setTimeout(() => {
+          if (!done) { done = true; detach(); reject(new Error('Live session TTS reply timed out after 25s')); }
+        }, 25000);
+        const onTurn = () => {
+          if (done) return;
+          // Small grace so trailing audio chunks land before we resolve.
+          setTimeout(() => {
+            if (done) return;
+            done = true;
+            clearTimeout(timeoutId);
+            detach();
+            resolve();
+          }, 250);
+        };
+        liveSession.once('live:turnComplete', onTurn);
+      }).catch(e => { detach(); throw e; });
+
+      if (turnError) throw new Error(`Live session error: ${turnError}`);
+
+      const pcmBase64 = collected.join('');
+      if (!pcmBase64) throw new Error('Live session returned no reply audio.');
+
+      const pcmBuffer = Buffer.from(pcmBase64, 'base64');
+      const wavBuffer = this.pcmToWav(pcmBuffer, 24000, 1, 16);
+
+      return {
+        audioBase64: wavBuffer.toString('base64'),
+        mimeType: 'audio/wav',
+        latencyMs: Date.now() - t0,
+        viaLiveSession: true,
+        model,
+        voice
+      };
+    } finally {
+      detach();
+      const status = liveSession.getStatus();
+      if (status.config && status.config.shortLived) {
+        await liveSession.stopSession().catch(() => {});
+      }
+    }
   }
 
   async transcribe(key, model = null, audioData, options = {}) {
