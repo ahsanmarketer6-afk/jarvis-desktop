@@ -5,10 +5,13 @@ const { getVoiceAdapter, VOICE_PROVIDERS, detectVoiceKeyMismatch } = require('./
 const liveSessionManager = require('./live');
 const db = require('../database');
 
-// 24-hour cache for voices and models lists: key = provider + '_' + keyHash, val = { data, timestamp }
+// Cache for voices and models lists: key = provider + '_' + keyHash, val = { data, timestamp }.
+// Voices/models are LIVE data — they must auto-refresh frequently so dropdowns never show
+// stale/expired entries. Models re-fetch every 5 min, voices every 2 min.
 const voicesCache = new Map();
 const modelsCache = new Map();
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const MODELS_CACHE_TTL_MS = 5 * 60 * 1000;
+const VOICES_CACHE_TTL_MS = 2 * 60 * 1000;
 
 class VoiceManager {
   constructor() {
@@ -68,24 +71,24 @@ class VoiceManager {
     return result;
   }
 
-  async fetchVoices(provider, key, customEndpoint = null, forceRefresh = false) {
+  async fetchVoices(provider, key, customEndpoint = null, forceRefresh = false, model = null) {
     const adapter = getVoiceAdapter(provider);
     if (!adapter) {
       throw new Error(`Unknown voice provider: "${provider}"`);
     }
 
-    const keyHash = crypto.createHash('sha256').update(String(key) + (customEndpoint || '')).digest('hex').slice(0, 16);
+    const keyHash = crypto.createHash('sha256').update(String(key) + (customEndpoint || '') + '|' + String(model || '')).digest('hex').slice(0, 16);
     const cacheKey = `${provider}_voices_${keyHash}`;
 
     if (!forceRefresh && voicesCache.has(cacheKey)) {
       const cached = voicesCache.get(cacheKey);
-      if (Date.now() - cached.timestamp < CACHE_TTL_MS) {
+      if (Date.now() - cached.timestamp < VOICES_CACHE_TTL_MS) {
         return { voices: cached.data, cached: true };
       }
     }
 
     try {
-      const voices = await adapter.fetchVoices(key, { customEndpoint });
+      const voices = await adapter.fetchVoices(key, { customEndpoint, model, forceRefresh });
       voicesCache.set(cacheKey, { data: voices, timestamp: Date.now() });
       db.logActivity(
         'Voice API',
@@ -116,7 +119,7 @@ class VoiceManager {
 
     if (!forceRefresh && modelsCache.has(cacheKey)) {
       const cached = modelsCache.get(cacheKey);
-      if (Date.now() - cached.timestamp < CACHE_TTL_MS) {
+      if (Date.now() - cached.timestamp < MODELS_CACHE_TTL_MS) {
         return { models: cached.data, cached: true };
       }
     }
@@ -361,7 +364,7 @@ class VoiceManager {
     }
 
     // Probe/query live STT models for this key to select best active STT model
-    const liveModels = await this.getModels('gemini', rawKey, { category: 'stt' }).catch(() => []);
+    const liveModels = await this.fetchModels('gemini', rawKey, null, false, 'stt').catch(() => []);
     const selectedModel = liveModels[0]?.id || null;
 
     const saveRes = await this.saveKey({
@@ -398,9 +401,19 @@ class VoiceManager {
 
     let useModel = model || geminiVoiceKey?.selected_model;
     if (!useModel) {
-      const liveModels = await this.getModels('gemini', rawKey, { category: 'live' }).catch(() => []);
+      const liveModels = await this.fetchModels('gemini', rawKey, null, false, 'live').catch(() => []);
       useModel = liveModels[0]?.id;
     }
+
+    // Guard: refuse non-live models early with a clear message instead of a cryptic
+    // WebSocket failure. (Live API only accepts bidiGenerateContent models.)
+    if (useModel && !/live|native-audio|realtime|bidi/i.test(useModel)) {
+      throw new Error(
+        `Model "${useModel}" is not a Live API (bidiGenerateContent) model, so realtime mic conversation cannot run on it. ` +
+        `Select a model with the [Live API Dialog ⚡] badge for Live Mode, or use Standard Voice Mode (STT/Brain/TTS) with this model.`
+      );
+    }
+
     const useVoice = voice || geminiVoiceKey?.selected_voice || 'Puck';
 
     return await this.liveSession.startSession({

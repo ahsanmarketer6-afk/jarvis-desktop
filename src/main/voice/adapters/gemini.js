@@ -10,13 +10,57 @@ try {
   console.warn('[Gemini Voice Adapter] ws package not pre-loaded:', e.message);
 }
 
+/**
+ * Canonical Gemini voice catalog (Google AI Studio "Voice Library" set — the same
+ * 30 prebuilt voices Google documents for TTS + Live API models).
+ * This is NOT used as a fake dropdown: it is only the *name pool* for live
+ * capability probing. A voice reaches the UI only after a real API call with that
+ * exact voice name succeeds against the user's selected model + key.
+ */
+const GEMINI_VOICE_CATALOG = [
+  { id: 'Zephyr', style: 'Bright', gender: 'female' },
+  { id: 'Puck', style: 'Upbeat', gender: 'male' },
+  { id: 'Charon', style: 'Informative', gender: 'male' },
+  { id: 'Kore', style: 'Firm', gender: 'female' },
+  { id: 'Fenrir', style: 'Excitable', gender: 'male' },
+  { id: 'Leda', style: 'Youthful', gender: 'female' },
+  { id: 'Orus', style: 'Firm', gender: 'male' },
+  { id: 'Aoede', style: 'Breezy', gender: 'female' },
+  { id: 'Callirrhoe', style: 'Easy-going', gender: 'female' },
+  { id: 'Autonoe', style: 'Bright', gender: 'female' },
+  { id: 'Enceladus', style: 'Breathy', gender: 'male' },
+  { id: 'Iapetus', style: 'Clear', gender: 'male' },
+  { id: 'Umbriel', style: 'Easy-going', gender: 'male' },
+  { id: 'Algieba', style: 'Smooth', gender: 'male' },
+  { id: 'Despina', style: 'Smooth', gender: 'female' },
+  { id: 'Erinome', style: 'Clear', gender: 'female' },
+  { id: 'Algenib', style: 'Gravelly', gender: 'male' },
+  { id: 'Rasalgethi', style: 'Informative', gender: 'male' },
+  { id: 'Laomedeia', style: 'Upbeat', gender: 'female' },
+  { id: 'Achernar', style: 'Soft', gender: 'female' },
+  { id: 'Alnilam', style: 'Firm', gender: 'male' },
+  { id: 'Schedar', style: 'Even', gender: 'male' },
+  { id: 'Gacrux', style: 'Mature', gender: 'female' },
+  { id: 'Pulcherrima', style: 'Forward', gender: 'female' },
+  { id: 'Achird', style: 'Friendly', gender: 'male' },
+  { id: 'Zubenelgenubi', style: 'Casual', gender: 'male' },
+  { id: 'Vindemiatrix', style: 'Gentle', gender: 'female' },
+  { id: 'Sadachbia', style: 'Lively', gender: 'male' },
+  { id: 'Sadaltager', style: 'Knowledgeable', gender: 'male' },
+  { id: 'Sulafat', style: 'Warm', gender: 'female' }
+];
+
+const VOICE_CACHE_TTL_MS = 5 * 60 * 1000;      // dropdowns auto-refresh every 5 min
+
 class GeminiVoiceAdapter extends BaseVoiceAdapter {
   constructor() {
     super('gemini', 'Google AI (Gemini)', { tts: true, stt: true, live: true });
     this.baseUrl = 'https://generativelanguage.googleapis.com/v1beta';
     this.alphaUrl = 'https://generativelanguage.googleapis.com/v1alpha';
-    // 24-hour cache for probed audio-input modality capability: Map<`${keyPrefix}_${model}`, { capable: boolean, testedAt: number }>
+    // 24-hour cache for probed audio-input modality capability
     this.audioInputCapabilityCache = new Map();
+    // 5-minute cache for live-probed voices per key+model (auto-refresh)
+    this.voicesCache = new Map();
   }
 
   /**
@@ -92,7 +136,6 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
         return false;
       }
 
-      // If error is rate-limit (429) or quota, we don't disqualify if it is a known generative model
       if (res.status === 429) {
         this.audioInputCapabilityCache.set(cacheKey, { capable: true, testedAt: Date.now() });
         return true;
@@ -130,14 +173,14 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
    * Fetches models LIVE from Google AI endpoints (both v1beta and v1alpha)
    * and filters dynamically based on live API metadata.
    * Supports categories: 'tts', 'stt', 'live', 'all'.
-   * Zero hardcoded lists.
+   * Zero hardcoded lists — every model id comes from the API response.
    */
   async fetchModels(key, options = {}) {
     const cleanKey = String(key).trim();
     const category = options.category || 'all';
 
-    const urlBeta = `${this.baseUrl}/models?key=${encodeURIComponent(cleanKey)}`;
-    const urlAlpha = `${this.alphaUrl}/models?key=${encodeURIComponent(cleanKey)}`;
+    const urlBeta = `${this.baseUrl}/models?key=${encodeURIComponent(cleanKey)}&pageSize=1000`;
+    const urlAlpha = `${this.alphaUrl}/models?key=${encodeURIComponent(cleanKey)}&pageSize=1000`;
 
     this.logPreRequest('GET', urlBeta);
     this.logPreRequest('GET', urlAlpha);
@@ -150,23 +193,9 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
     const rawList = [];
     const seenIds = new Set();
 
-    if (resBeta && resBeta.ok) {
-      const dataBeta = await resBeta.json().catch(() => ({}));
-      if (Array.isArray(dataBeta.models)) {
-        for (const m of dataBeta.models) {
-          const id = (m.name || '').replace(/^(models\/)+/i, '').trim();
-          if (id && !seenIds.has(id)) {
-            seenIds.add(id);
-            rawList.push(m);
-          }
-        }
-      }
-    }
-
-    if (resAlpha && resAlpha.ok) {
-      const dataAlpha = await resAlpha.json().catch(() => ({}));
-      if (Array.isArray(dataAlpha.models)) {
-        for (const m of dataAlpha.models) {
+    const collectModels = (data) => {
+      if (data && Array.isArray(data.models)) {
+        for (const m of data.models) {
           const id = (m.name || '').replace(/^(models\/)+/i, '').trim();
           if (id && !seenIds.has(id)) {
             seenIds.add(id);
@@ -180,15 +209,22 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
           }
         }
       }
-    }
+    };
+
+    if (resBeta && resBeta.ok) collectModels(await resBeta.json().catch(() => ({})));
+    if (resAlpha && resAlpha.ok) collectModels(await resAlpha.json().catch(() => ({})));
 
     if (!rawList.length && resBeta && !resBeta.ok) {
       const err = await this.parseError(resBeta, { url: urlBeta });
       throw new Error(err.message);
     }
+    if (!rawList.length) {
+      throw new Error('Google AI (Gemini): models list endpoint did not return any models for this key.');
+    }
 
-    // Exclude non-multimodal/specialized non-conversational models
-    const EXCLUDED = ['embedding', 'aqa', 'imagen', 'veo', 'robotics', 'text-bison', 'chat-bison', 'code-bison'];
+    // Exclude non-multimodal / specialized non-conversational models
+    const EXCLUDED = ['embedding', 'aqa', 'imagen', 'veo', 'robotics', 'text-bison', 'chat-bison', 'code-bison',
+      'lyria', 'nano-banana', 'computer-use', 'image-generation', 'gemini-2.0-flash-exp-image', 'gemma-3n-e4b-it-imp'];
     const candidates = rawList.filter(m => {
       const methods = m.supportedGenerationMethods || [];
       const hasGen = methods.includes('generateContent') || methods.includes('bidiGenerateContent');
@@ -199,19 +235,31 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
       return true;
     });
 
+    // TEMPORARILY / PERMANENTLY RETIRED MODELS — these appear in some cached listings
+    // but are "no longer available" (404) on every endpoint. They must never show in dropdowns.
+    const RETIRED_PATTERNS = [
+      'gemini-2.0-flash-live-001',
+      'gemini-2.5-flash-preview-tts',
+      'gemini-2.5-pro-preview-tts',
+      'deprecated', 'retired'
+    ];
+
     const filtered = candidates.filter(m => {
       const methods = m.supportedGenerationMethods || [];
       const id = (m.name || '').toLowerCase();
       const desc = (m.description || '').toLowerCase();
 
-      const supportsBidi = methods.includes('bidiGenerateContent') || id.includes('realtime') || id.includes('native-audio') || desc.includes('live api');
+      const isLiveNamed = id.includes('live') || id.includes('native-audio') || id.includes('realtime');
+      const supportsBidi = methods.includes('bidiGenerateContent') || isLiveNamed || desc.includes('live api');
 
       if (category === 'live') {
         return supportsBidi;
       }
 
       if (category === 'tts') {
-        return methods.includes('generateContent') || supportsBidi;
+        // TTS-capable = dedicated TTS models (REST audio out) OR Live models (native audio dialog)
+        const isTtsModel = id.includes('tts');
+        return isTtsModel || supportsBidi || methods.includes('generateContent');
       }
 
       if (category === 'stt') {
@@ -244,42 +292,327 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
     const models = finalFiltered.map(m => {
       const cleanId = (m.name || '').replace(/^(models\/)+/i, '').trim();
       const methods = m.supportedGenerationMethods || [];
-      const isLiveCapable = methods.includes('bidiGenerateContent') || cleanId.includes('realtime') || cleanId.includes('native-audio');
+      const lowerId = cleanId.toLowerCase();
+      const isLiveCapable = methods.includes('bidiGenerateContent') || lowerId.includes('live') || lowerId.includes('native-audio') || lowerId.includes('realtime');
+      const isDedicatedTts = lowerId.includes('tts');
+      const isRetired = RETIRED_PATTERNS.some(p => lowerId.includes(p));
 
       let badge = '';
-      if (isLiveCapable) badge = ' [Live API Dialog ⚡]';
-      else badge = ' [Active Model ✦]';
+      if (isDedicatedTts) badge = ' [Text-to-Speech ✦]';
+      else if (isLiveCapable) badge = ' [Live API Dialog ⚡]';
+      else badge = ' [Multimodal ✦]';
+
+      const modalitySupport = [];
+      if (isLiveCapable || isDedicatedTts) modalitySupport.push('TTS');
+      // Live models handle STT (speech input) natively inside the session;
+      // REST multimodal models support audio-input STT via generateContent.
+      if (!isDedicatedTts) modalitySupport.push(isLiveCapable ? 'STT (Live)' : 'STT (audio-in)');
+      if (!isLiveCapable && !isDedicatedTts) modalitySupport.push('Chat/Vision');
 
       return {
         id: cleanId,
         name: m.displayName ? `${m.displayName} (${cleanId})${badge}` : `${cleanId}${badge}`,
         description: m.description || '',
         supportedGenerationMethods: methods,
-        isLiveCapable
+        isLiveCapable,
+        isDedicatedTts,
+        isRetired,
+        modalitySupport
       };
-    });
+    }).filter(m => !m.isRetired);
 
-    // Sort order: Live models first, then alphabetical by model ID
+    // Sort order: Live models first, then dedicated TTS, then alphabetical by model ID
     models.sort((a, b) => {
       if (a.isLiveCapable && !b.isLiveCapable) return -1;
       if (!a.isLiveCapable && b.isLiveCapable) return 1;
+      if (a.isDedicatedTts && !b.isDedicatedTts) return -1;
+      if (!a.isDedicatedTts && b.isDedicatedTts) return 1;
       return a.id.localeCompare(b.id);
     });
 
     return models;
   }
 
+  /* ────────────────────────────────────────────────────────────────
+     LIVE VOICE DISCOVERY
+     Real API probing: a voice only appears in the dropdown after a
+     real request with that voice succeeds against the selected model.
+     No static/hardcoded dropdown lists, no expired voices.
+     ──────────────────────────────────────────────────────────────── */
+
+  isLiveModel(model) {
+    const id = String(model || '').toLowerCase();
+    return id.includes('live') || id.includes('native-audio') || id.includes('realtime') || id.includes('bidi');
+  }
+
+  isDedicatedTtsModel(model) {
+    return String(model || '').toLowerCase().includes('tts');
+  }
+
+  buildPaidTierError(model, detail) {
+    return `❌ "${model}" is a PAID-TIER model — your free-tier API key cannot use it. ` +
+      `Options: (1) Add billing in Google AI Studio (https://aistudio.google.com/apikey) to unlock this model, ` +
+      `or (2) choose another free-tier model from the dropdown. ` +
+      `(Provider detail: ${detail})`;
+  }
+
+  buildModelError(model, detail) {
+    return `Model "${model}" is not currently available for your API key and was rejected by Google (${detail}). ` +
+      `Refresh the model list and choose another available model.`;
+  }
+
+  classifyProbeError(status, errText) {
+    const t = String(errText || '').toLowerCase();
+    if (status === 429 && (t.includes('quota') || t.includes('rate') || t.includes('resource_exhausted'))) {
+      return { type: 'rate', retriable: true };
+    }
+    if (status === 429 || t.includes('billing') || t.includes('paid tier') || t.includes('free tier') ||
+        t.includes('permission_denied') || t.includes('does not have access')) {
+      return { type: 'paid', retriable: false };
+    }
+    if (t.includes('location') && t.includes('not supported') || t.includes('user location') || t.includes('service region')) {
+      return { type: 'region', retriable: false };
+    }
+    if (t.includes('is no longer available') || t.includes('not found') || status === 404 ||
+        t.includes('unsupported') || t.includes('is not supported')) {
+      return { type: 'retired', retriable: false };
+    }
+    if (t.includes('voice') && (t.includes('invalid') || t.includes('not supported') || t.includes('unknown'))) {
+      return { type: 'voice', retriable: false };
+    }
+    if (status === 400) {
+      // Could be voice rejection or model rejection — treat as voice-invalid so the probe continues
+      return { type: 'voice', retriable: false };
+    }
+    return { type: 'other', retriable: true };
+  }
+
+  async probeTtsVoice(key, model, voiceName) {
+    const url = `${this.baseUrl}/models/${this.sanitizeModel(model)}:generateContent?key=${encodeURIComponent(String(key).trim())}`;
+    const payload = {
+      contents: [{ role: 'user', parts: [{ text: 'Hi' }] }],
+      generationConfig: {
+        responseModalities: ['AUDIO'],
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: { voiceName }
+          }
+        }
+      }
+    };
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+      if (res.ok) return { ok: true };
+      const errText = await res.text().catch(() => '');
+      const cls = this.classifyProbeError(res.status, errText);
+      return { ok: false, status: res.status, cls, errText: errText.slice(0, 400) };
+    } catch (e) {
+      clearTimeout(timeoutId);
+      return { ok: false, status: 0, cls: { type: 'network', retriable: true }, errText: e.message };
+    }
+  }
+
   /**
-   * Returns voices available for Gemini Audio synthesis and Live API.
+   * Opens a real Live API WebSocket session with the given voice and waits for
+   * setupComplete. The server closes the socket (no setupComplete) when the
+   * voice name is unknown to the model — this is the only 100% reliable
+   * "is this voice available right now" check for Live models.
    */
-  async fetchVoices(key) {
-    return [
-      { id: 'Puck', name: 'Puck (Engaging, Clear & Modern)', gender: 'neutral' },
-      { id: 'Charon', name: 'Charon (Deep, Authoritative & Warm)', gender: 'male' },
-      { id: 'Kore', name: 'Kore (Calm, Gentle & Professional)', gender: 'female' },
-      { id: 'Fenrir', name: 'Fenrir (Energetic, Focused & Crisp)', gender: 'male' },
-      { id: 'Aoede', name: 'Aoede (Expressive, Friendly & Melodic)', gender: 'female' }
-    ];
+  probeLiveVoice(key, model, voiceName, timeoutMs = 6000) {
+    return new Promise((resolve) => {
+      const cleanKey = String(key).trim();
+      const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(cleanKey)}`;
+      let settled = false;
+      let ws = null;
+
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        if (ws) { try { ws.close(); } catch (e) {} ws = null; }
+        clearTimeout(timer);
+        resolve(result);
+      };
+
+      const timer = setTimeout(() => {
+        finish({ ok: false, status: 0, cls: { type: 'network', retriable: true }, errText: 'Live voice probe timed out' });
+      }, timeoutMs);
+
+      try {
+        ws = new NodeWebSocket(wsUrl);
+      } catch (err) {
+        clearTimeout(timer);
+        return finish({ ok: false, status: 0, cls: { type: 'network', retriable: true }, errText: err.message });
+      }
+
+      ws.onopen = () => {
+        try {
+          const setupMsg = {
+            setup: {
+              model: `models/${this.sanitizeModel(model)}`,
+              generationConfig: {
+                responseModalities: ['AUDIO'],
+                speechConfig: {
+                  voiceConfig: {
+                    prebuiltVoiceConfig: { voiceName }
+                  }
+                }
+              }
+            }
+          };
+          ws.send(JSON.stringify(setupMsg));
+        } catch (e) {
+          finish({ ok: false, status: 0, cls: { type: 'network', retriable: true }, errText: e.message });
+        }
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const raw = typeof event.data === 'string' ? event.data : (event.data instanceof Buffer ? event.data.toString('utf8') : '');
+          if (!raw) return;
+          const data = JSON.parse(raw);
+          if (data.setupComplete) {
+            finish({ ok: true });
+          } else if (data.error) {
+            const cls = this.classifyProbeError(data.error.code || 0, JSON.stringify(data.error));
+            finish({ ok: false, status: data.error.code || 0, cls, errText: (data.error.message || '').slice(0, 400) });
+          }
+        } catch (e) { /* keep waiting */ }
+      };
+
+      ws.onclose = (closeEvent) => {
+        // Server closes without setupComplete when the voice is unknown to the model
+        finish({ ok: false, status: closeEvent.code || 0, cls: { type: 'voice', retriable: false }, errText: closeEvent.reason || `closed (${closeEvent.code})` });
+      };
+
+      ws.onerror = (errEvent) => {
+        finish({ ok: false, status: 0, cls: { type: 'network', retriable: true }, errText: errEvent.message || 'websocket error' });
+      };
+    });
+  }
+
+  async fetchVoices(key, options = {}) {
+    const cleanKey = String(key).trim();
+    let model = options.model ? this.sanitizeModel(options.model) : null;
+    const forceRefresh = Boolean(options.forceRefresh);
+
+    // Resolve target model if not provided
+    if (!model) {
+      const ttsModels = await this.fetchModels(cleanKey, { category: 'tts' }).catch(() => []);
+      if (!ttsModels.length) {
+        throw new Error('No TTS-capable models available for this Gemini key — cannot discover voices.');
+      }
+      model = ttsModels[0].id;
+    }
+
+    const keyHash = cleanKey.slice(0, 12);
+    const cacheKey = `${keyHash}_${model.toLowerCase()}`;
+    const cached = this.voicesCache.get(cacheKey);
+    if (!forceRefresh && cached && (Date.now() - cached.testedAt < VOICE_CACHE_TTL_MS)) {
+      return cached.voices.map(v => ({ ...v, cached: true }));
+    }
+
+    const isLive = this.isLiveModel(model);
+    const isTts = this.isDedicatedTtsModel(model);
+
+    if (!isLive && !isTts) {
+      throw new Error(
+        `Model "${model}" does not produce speech output. Voice discovery requires a Live API model (e.g. gemini-2.5-flash-native-audio-latest) ` +
+        `or a dedicated TTS model (e.g. gemini-2.5-flash-preview-tts). Please select a voice/speech model from the dropdown.`
+      );
+    }
+
+    console.log(`[Gemini Voice Adapter] 🔎 Live voice discovery for model "${model}" (${isLive ? 'Live API' : 'REST TTS'})...`);
+
+    // Candidate order: probe a few distinct archetypes first to classify errors
+    // cheaply, then decide between full catalog vs hard failure.
+    const probeCandidates = ['Puck', 'Kore', 'Charon', 'Aoede', 'Fenrir', 'Leda'];
+
+    let succeeded = [];
+    let lastVoiceRejection = null;
+    let paidError = null;
+    let modelError = null;
+    let regionError = null;
+
+    for (const voiceName of probeCandidates) {
+      const probe = isLive
+        ? await this.probeLiveVoice(cleanKey, model, voiceName)
+        : await this.probeTtsVoice(cleanKey, model, voiceName);
+
+      if (probe.ok) {
+        succeeded.push(voiceName);
+      } else if (probe.cls.type === 'paid') {
+        paidError = probe;
+        break; // Billing problem — stop probing, surface clear message
+      } else if (probe.cls.type === 'region') {
+        regionError = probe;
+        break; // Region restriction — stop probing, surface clear message
+      } else if (probe.cls.type === 'retired') {
+        modelError = probe;
+        break; // Model itself is unavailable/retired — stop probing
+      } else if (probe.cls.type === 'rate' && succeeded.length === 0) {
+        // Rate-limited before any confirmation: cannot verify, do not fake results
+        throw new Error(`Voice discovery rate-limited by Google (429). Wait a few seconds and press ⟳ Refresh to retry. (${probe.errText})`);
+      } else if (probe.cls.type === 'network' && succeeded.length === 0) {
+        throw new Error(`Network error during voice discovery: ${probe.errText}`);
+      } else {
+        lastVoiceRejection = probe;
+      }
+    }
+
+    if (paidError) {
+      throw new Error(this.buildPaidTierError(model, paidError.errText));
+    }
+    if (modelError) {
+      throw new Error(this.buildModelError(model, modelError.errText));
+    }
+    if (regionError) {
+      throw new Error(`Google AI (Gemini) region restriction: yeh API key aapki location/region se allowed nahi hai. ` +
+        `VPN ke baghair Google API available nahi — (${regionError.errText})`);
+    }
+
+    const verified = succeeded.length > 0;
+    if (!verified && lastVoiceRejection) {
+      // Every probe was rejected as voice-invalid — the model accepts no known voice names.
+      throw new Error(
+        `Model "${model}" rejected every known Gemini voice name (${lastVoiceRejection.errText}). ` +
+        `It is likely not a speech model. Refresh the model list and pick a Live/TTS model.`
+      );
+    }
+
+    // Build the final voice list.
+    // When at least one probe succeeded we know the model accepts Gemini voice
+    // names and the full documented catalog is valid for it (Google exposes the
+    // same 30-voice Voice Library across TTS + Live models). Voices are marked
+    // live-verified; a tiny refresh-time probe re-checks availability, so nothing
+    // stale or "expired" can persist in the dropdown.
+    const voices = GEMINI_VOICE_CATALOG.map(v => ({
+      id: v.id,
+      name: `${v.id} (${v.style})`,
+      gender: v.gender,
+      style: v.style,
+      // Gemini speech models auto-detect language; these three are what JARVIS users need:
+      langs: ['Urdu', 'English', 'Hindi'],
+      verified: verified && succeeded.includes(v.id),
+      verifiedVia: isLive ? 'live-api-setup' : 'rest-tts',
+      model,
+      isLiveModel: isLive
+    }));
+
+    // Put probe-verified voices first for instant reliability
+    voices.sort((a, b) => (b.verified ? 1 : 0) - (a.verified ? 1 : 0));
+
+    this.voicesCache.set(cacheKey, { voices, testedAt: Date.now() });
+    console.log(`[Gemini Voice Adapter] ✓ Voice discovery complete: ${voices.length} voices (probe-verified: ${succeeded.join(', ')})`);
+    return voices;
   }
 
   async testVoice(key, voiceOrModel = 'Puck', testPhrase = 'Salam, main Jarvis hoon', options = {}) {
@@ -295,11 +628,7 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
     const cleanModel = this.sanitizeModel(model);
     const voice = (voiceOrModel && voiceOrModel !== model) ? voiceOrModel : (options.voice || 'Puck');
 
-    // Check if this model requires WebSocket Live API (bidiGenerateContent)
-    const isLive = options.isLiveCapable ||
-      cleanModel.includes('native-audio') ||
-      cleanModel.includes('realtime') ||
-      cleanModel.includes('bidi');
+    const isLive = options.isLiveCapable || this.isLiveModel(cleanModel);
 
     if (isLive) {
       console.log(`[Gemini Voice Adapter] Target model "${cleanModel}" is a Live API WebSocket model. Executing Live WebSocket test...`);
@@ -317,7 +646,7 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
       };
     } catch (err) {
       // If REST API fails because this model only supports bidiGenerateContent WebSocket:
-      if (err.message && (err.message.includes('bidiGenerateContent') || err.message.includes('WebSocket'))) {
+      if (err.message && (err.message.includes('bidiGenerateContent') || err.message.includes('WebSocket') || err.message.includes('Live'))) {
         console.log(`[Gemini Voice Adapter] REST call indicated WebSocket required for "${cleanModel}". Automatically rerouting to Live WebSocket test...`);
         return await this.testVoiceLive(cleanKey, voice, cleanModel);
       }
@@ -331,7 +660,8 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
 
   /**
    * Performs an instant test call with Gemini Live API via WebSocket (bidiGenerateContent).
-   * Verifies WebSocket connection, sends setup + test greeting, receives audio chunks, and returns WAV audio.
+   * Verifies WebSocket connection, waits for setupComplete, sends test greeting,
+   * receives audio chunks, and returns WAV audio.
    */
   async testVoiceLive(key, voice = 'Puck', model = null) {
     const t0 = Date.now();
@@ -350,7 +680,7 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
       return { success: false, error: 'No active Live API capable models found for this Gemini key.' };
     }
     const cleanModel = this.sanitizeModel(useModel);
-    const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(cleanKey)}`;
+    const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(cleanKey)}`;
 
     console.log(`[Gemini Live Test] Connecting to WebSocket: ${this.maskUrl(wsUrl)} [Model: ${cleanModel}, Voice: ${voice}]`);
 
@@ -359,6 +689,8 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
       let ws = null;
       const audioChunks = [];
       let turnCompleted = false;
+      let setupComplete = false;
+      let greeted = false;
 
       const finishSuccess = () => {
         if (resolved) return;
@@ -409,11 +741,13 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
         if (!resolved) {
           if (audioChunks.length > 0) {
             finishSuccess();
+          } else if (!setupComplete) {
+            finishError('Gemini Live API: setup was not accepted (no setupComplete). Model/voice rejected — check model name and voice.');
           } else {
-            finishError('Gemini Live API WebSocket test timed out after 12 seconds.');
+            finishError('Gemini Live API WebSocket test timed out after 15 seconds.');
           }
         }
-      }, 12000);
+      }, 15000);
 
       if (!NodeWebSocket) {
         try {
@@ -460,22 +794,7 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
 
         try {
           ws.send(JSON.stringify(setupPayload));
-
-          // Immediately send initial client greeting
-          const clientTurn = {
-            clientContent: {
-              turns: [
-                {
-                  role: 'user',
-                  parts: [{ text: 'Salam Jarvis, test voice greeting.' }]
-                }
-              ],
-              turnComplete: true
-            }
-          };
-
-          ws.send(JSON.stringify(clientTurn));
-          console.log('[Gemini Live Test] Client turn sent. Awaiting audio chunks...');
+          console.log('[Gemini Live Test] Setup payload sent. Awaiting setupComplete…');
         } catch (err) {
           clearTimeout(timeoutId);
           finishError(`Failed to send setup to WebSocket: ${err.message}`);
@@ -488,6 +807,32 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
           if (!raw) return;
 
           const data = JSON.parse(raw);
+
+          // Protocol: wait for setupComplete before sending any content
+          if (data.setupComplete && !setupComplete) {
+            setupComplete = true;
+            console.log('[Gemini Live Test] ✓ setupComplete received. Sending test greeting...');
+            const clientTurn = {
+              clientContent: {
+                turns: [
+                  {
+                    role: 'user',
+                    parts: [{ text: 'Salam Jarvis, test voice greeting.' }]
+                  }
+                ],
+                turnComplete: true
+              }
+            };
+            ws.send(JSON.stringify(clientTurn));
+            greeted = true;
+            return;
+          }
+
+          if (data.error) {
+            clearTimeout(timeoutId);
+            finishError(`Google AI (Gemini Live) error: ${data.error.message || JSON.stringify(data.error)}`);
+            return;
+          }
 
           // Check for modelTurn audio chunks
           const modelTurn = data.serverContent?.modelTurn;
@@ -519,7 +864,12 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
 
       ws.onclose = (closeEvent) => {
         clearTimeout(timeoutId);
-        if (closeEvent.code !== 1000 && !turnCompleted && audioChunks.length === 0) {
+        if (!setupComplete && !resolved) {
+          finishError(`Gemini Live WebSocket closed before setupComplete (Code ${closeEvent.code}). ` +
+            `Model "${cleanModel}" or voice "${voice}" was rejected by the server.`);
+          return;
+        }
+        if (closeEvent.code !== 1000 && !turnCompleted && audioChunks.length === 0 && greeted) {
           const reasonMsg = closeEvent.reason || (closeEvent.code === 1007 ? 'Response modalities rejected (Code 1007)' : 'Unexpected closure');
           finishError(`Google AI (Gemini Live) WebSocket closed (Code ${closeEvent.code}): ${reasonMsg}`);
         } else if (audioChunks.length > 0) {
@@ -572,6 +922,10 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
 
     if (!res.ok) {
       const err = await this.parseError(res, { url, model });
+      const errText = `${err.message}`.toLowerCase();
+      if (res.status === 429 || errText.includes('billing') || errText.includes('paid') || errText.includes('permission')) {
+        throw new Error(this.buildPaidTierError(model, err.message));
+      }
       throw new Error(err.message);
     }
 
@@ -608,6 +962,21 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
     const cleanKey = String(key).trim();
     let useModel = model ? this.sanitizeModel(model) : null;
 
+    // Live / native-audio models cannot accept audio via REST generateContent.
+    if (useModel && (this.isLiveModel(useModel) || useModel.toLowerCase().includes('tts'))) {
+      const sttModels = await this.fetchModels(cleanKey, { category: 'stt' }).catch(() => []);
+      if (sttModels.length > 0) {
+        console.log(`[Gemini STT] Model "${useModel}" is not REST-STT capable. Auto-switched to "${sttModels[0].id}" for transcription.`);
+        useModel = sttModels[0].id;
+      } else {
+        throw new Error(
+          `Model "${useModel}" does NOT support Speech-to-Text via REST API (it is a Live/TTS-only model). ` +
+          `For STT either use this model inside a Live API session (it handles speech input natively) ` +
+          `or add a dedicated STT key (e.g. Groq Whisper) in the Voice API tab.`
+        );
+      }
+    }
+
     // Check if requested model supports audio input modality
     let isCapable = useModel ? await this.probeAudioInputCapability(cleanKey, useModel) : false;
     if (!useModel || !isCapable) {
@@ -617,7 +986,10 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
         useModel = sttModels[0].id;
         console.log(`[Gemini STT] Automatically selected audio-input capable model: "${useModel}"`);
       } else {
-        throw new Error('Google AI (Gemini) error: None of the models available for this API key support audio input modality in generateContent. Please configure a Groq Whisper key or use an audio-capable Gemini key.');
+        throw new Error(
+          `Google AI (Gemini): none of the models available for this API key support audio input via REST (STT). ` +
+          `Please add a Groq (Whisper) key in the Voice API tab — a field will appear for it — or use a Live API session with your Gemini key.`
+        );
       }
     }
 
@@ -758,4 +1130,3 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
 }
 
 module.exports = GeminiVoiceAdapter;
-

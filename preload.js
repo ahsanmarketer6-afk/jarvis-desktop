@@ -94,7 +94,7 @@ contextBridge.exposeInMainWorld('jarvis', {
     detectMismatch: (provider, key) => ipcRenderer.invoke('voice:detectMismatch', provider, key),
     getExistingGeminiKey: () => ipcRenderer.invoke('voice:getExistingGeminiKey'),
     validateKey: (provider, key, customEndpoint) => ipcRenderer.invoke('voice:validateKey', provider, key, customEndpoint),
-    fetchVoices: (provider, key, customEndpoint, forceRefresh) => ipcRenderer.invoke('voice:fetchVoices', provider, key, customEndpoint, forceRefresh),
+    fetchVoices: (provider, key, customEndpoint, forceRefresh, model) => ipcRenderer.invoke('voice:fetchVoices', provider, key, customEndpoint, forceRefresh, model),
     fetchModels: (provider, key, customEndpoint, forceRefresh, category) => ipcRenderer.invoke('voice:fetchModels', provider, key, customEndpoint, forceRefresh, category),
     testVoice: (provider, key, voice, model, customEndpoint) => ipcRenderer.invoke('voice:testVoice', provider, key, voice, model, customEndpoint),
     saveKey: (payload) => ipcRenderer.invoke('voice:saveKey', payload),

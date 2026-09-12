@@ -2109,11 +2109,51 @@ async function renderVoice(container) {
   // Step 4: Validate Button
   const validateBtn = el('button', { class: 'btn primary', style: 'min-width:150px' }, '🔍 1. VERIFY VOICE KEY');
 
-  // Step 5 & 6: Live Voices & Models Selection UI
+  // Step 5 & 6: Live Models & Voices Selection UI
+  // Flow: MODELS first (fetched live on validate) → VOICES second (fetched live for the chosen model)
   const discoverySection = el('div', { style: 'margin-top:14px;padding-top:14px;border-top:1px solid var(--line2);display:none' });
-  const voiceSelect = el('select', { class: 'select', style: 'flex:1;min-width:200px' });
-  const modelSelect = el('select', { class: 'select', style: 'flex:1;min-width:200px' });
-  const refreshVoicesBtn = el('button', { class: 'btn', title: 'Live refresh voices from provider endpoint' }, '⟳ Refresh Voices/Models');
+  const modelSelect = el('select', { class: 'select', style: 'flex:1;min-width:220px' });
+  const voiceSelect = el('select', { class: 'select', style: 'flex:1;min-width:220px' });
+  const refreshVoicesBtn = el('button', { class: 'btn', title: 'Live refresh models & voices from provider endpoint (auto-refreshes every 2 min too)' }, '⟳ Refresh');
+
+  // Groq STT fallback field (appears only when the chosen Gemini model cannot do STT via REST)
+  const sttFallbackRow = el('div', { style: 'display:none;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px;background:rgba(245,158,11,0.07);border:1px solid rgba(245,158,11,0.35);border-radius:8px;padding:9px 12px' });
+  const sttFallbackKeyInput = el('input', { class: 'input', type: 'password', style: 'flex:1;min-width:220px;font-family:var(--font-mono)', placeholder: 'Paste Groq API key (gsk_…) for Whisper STT — is model ke liye zaroori hai' });
+  const sttFallbackStatus = el('span', { style: 'font-size:9.5px;color:var(--muted)' }, '');
+
+  function showSttFallback(reason) {
+    sttFallbackRow.style.display = 'flex';
+    sttFallbackStatus.innerHTML = reason;
+    fetchLiveVoicesAndModels._sttFallbackActive = true;
+  }
+  function hideSttFallback() {
+    sttFallbackRow.style.display = 'none';
+    sttFallbackStatus.innerHTML = '';
+    fetchLiveVoicesAndModels._sttFallbackActive = false;
+  }
+
+  sttFallbackKeyInput.addEventListener('change', async () => {
+    const gKey = sttFallbackKeyInput.value.trim();
+    if (!gKey) return;
+    sttFallbackStatus.innerHTML = '<span class="spin">◌</span> Verifying Groq key…';
+    try {
+      const res = await window.jarvis.voice.validateKey('groq', gKey);
+      if (res && res.valid) {
+        sttFallbackStatus.innerHTML = '<span style="color:var(--mint)">✓ Groq Whisper key valid — STT will use Groq (whisper-large-v3). Is Gemini model ko TTS/live ke liye rakhein.</span>';
+        toast('✓ Groq STT key verified!');
+      } else {
+        sttFallbackStatus.innerHTML = '<span style="color:#ff8888">✕ Groq key invalid: ' + (res?.error || 'rejected') + '</span>';
+      }
+    } catch (e) {
+      sttFallbackStatus.innerHTML = '<span style="color:#ff8888">✕ Groq check failed: ' + e.message + '</span>';
+    }
+  });
+
+  sttFallbackRow.append(
+    el('span', { style: 'font-size:10px;font-weight:700;color:#f59e0b' }, '🎧 STT KEY REQUIRED'),
+    sttFallbackKeyInput,
+    sttFallbackStatus
+  );
 
   // Step 7: Test Voice Call Button (actually plays real audio)
   const testVoiceBtn = el('button', { class: 'btn', style: 'min-width:150px;background:#1a231b;border-color:var(--mint);color:var(--mint)' }, '🔊 2. TEST VOICE PLAYBACK');
@@ -2188,6 +2228,7 @@ async function renderVoice(container) {
     flowState.selectedModel = '';
     discoverySection.style.display = 'none';
     saveVoiceKeyBtn.style.display = 'none';
+    hideSttFallback();
     customEndpointInput.style.display = flowState.provider === 'custom' ? 'block' : 'none';
     setStatus('');
     checkExistingGeminiKey();
@@ -2211,8 +2252,9 @@ async function renderVoice(container) {
       const res = await window.jarvis.voice.validateKey(flowState.provider, key, flowState.customEndpoint);
       if (res && res.valid) {
         flowState.isValidated = true;
-        setStatus('✓ Key valid hai ✅ (Live speech provider handshake succeeded). Fetching voices & models…', 'ok');
+        setStatus('✓ Key valid hai ✅ (Live speech provider handshake succeeded). Ab LIVE models & voices fetch ho rahi hain…', 'ok');
         await fetchLiveVoicesAndModels(false);
+        startAutoRefresh(); // keep dropdowns real & current forever
       } else {
         flowState.isValidated = false;
         discoverySection.style.display = 'none';
@@ -2231,66 +2273,141 @@ async function renderVoice(container) {
     }
   };
 
-  // Step 5 & 6: Live Voices & Models Fetch
+  // Step 5 & 6: Live Models fetch first, then Voices fetch for the selected model
+  // (REAL fetch from the provider API every time — with short-TTL auto-refresh so
+  //  dropdowns only ever contain models/voices that are available RIGHT NOW.)
   async function fetchLiveVoicesAndModels(forceRefresh = false) {
     flowState.loadingVoices = true;
     refreshVoicesBtn.disabled = true;
     refreshVoicesBtn.textContent = '◌ Fetching…';
-    setStatus('<span class="spin">◌</span> Live voices & models fetch ho rahi hain (zero hardcoded list)…', 'spin');
+    setStatus('<span class="spin">◌</span> LIVE fetch: models & voices provider API se aa rahi hain (zero hardcoded)…', 'spin');
 
     const meta = getVoiceProviderMeta(flowState.provider);
 
     try {
-      // Fetch voices if provider supports TTS
-      if (meta.supportsTTS) {
-        const vRes = await window.jarvis.voice.fetchVoices(flowState.provider, flowState.rawKey, flowState.customEndpoint, forceRefresh);
-        flowState.voices = vRes?.voices || [];
-        voiceSelect.innerHTML = '';
-        flowState.voices.forEach(v => {
-          voiceSelect.appendChild(el('option', { value: v.id }, '♫ ' + (v.name || v.id) + (v.gender ? ` (${v.gender})` : '')));
-        });
-        if (flowState.voices.length) {
-          flowState.selectedVoice = flowState.voices[0].id;
-        }
-      }
-
-      // Fetch models if provider exposes models (filtered to speech/TTS models)
+      // 1) MODELS FIRST — live from the provider, filtered to speech-capable models
       const mRes = await window.jarvis.voice.fetchModels(flowState.provider, flowState.rawKey, flowState.customEndpoint, forceRefresh, 'tts');
       flowState.models = mRes?.models || [];
       modelSelect.innerHTML = '';
       flowState.models.forEach(m => {
-        const catBadge = m.category ? ` [${m.category.toUpperCase()}]` : '';
-        modelSelect.appendChild(el('option', { value: m.id }, '⚡ ' + (m.name || m.id) + catBadge));
+        const catBadge = m.modalitySupport && m.modalitySupport.length ? ' [' + m.modalitySupport.join(' · ') + ']' : '';
+        modelSelect.appendChild(el('option', { value: m.id }, (m.isLiveCapable ? '⚡ ' : '✦ ') + (m.name || m.id) + catBadge));
       });
       if (flowState.models.length) {
-        flowState.selectedModel = flowState.models[0].id;
+        // keep user's previous selection if it still exists in the fresh list
+        const keep = flowState.selectedModel && flowState.models.find(m => m.id === flowState.selectedModel);
+        flowState.selectedModel = keep ? flowState.selectedModel : flowState.models[0].id;
+        modelSelect.value = flowState.selectedModel;
       }
 
+      // 2) VOICES SECOND — live-probed against the SELECTED model
+      await refreshVoicesForModel(flowState.selectedModel, forceRefresh);
+
       discoverySection.style.display = 'block';
-      setStatus(`✓ Discovered ${flowState.voices.length} live voices and ${flowState.models.length} models! Run test call to hear audio sample.`, 'ok');
+      setStatus(`✓ LIVE discovered ${flowState.models.length} speech models and ${flowState.voices.length} voices for <b>${flowState.selectedModel}</b>. Test call chalayen ya seedha save karein.`, 'ok');
     } catch (err) {
-      setStatus('✕ Failed to fetch voices/models: ' + err.message, 'err');
+      const msg = err.message || String(err);
+      if (/groq/i.test(msg) && /stt|whisper/i.test(msg)) {
+        showSttFallback('Is model ke liye STT support nahi — Groq Whisper key add karein:');
+      }
+      setStatus('✕ Live fetch failed: ' + msg, 'err');
     } finally {
       flowState.loadingVoices = false;
       refreshVoicesBtn.disabled = false;
-      refreshVoicesBtn.textContent = '⟳ Refresh Voices/Models';
+      refreshVoicesBtn.textContent = '⟳ Refresh';
     }
   }
 
+  // Fetch (or auto-refresh) the VOICE list for a specific model — always a real API call
+  async function refreshVoicesForModel(model, forceRefresh = false) {
+    const meta = getVoiceProviderMeta(flowState.provider);
+    if (!model || !meta.supportsTTS) return;
+
+    voiceSelect.innerHTML = '';
+    voiceSelect.appendChild(el('option', { value: '' }, '◌ Loading live voices for ' + model + '…'));
+
+    try {
+      const vRes = await window.jarvis.voice.fetchVoices(flowState.provider, flowState.rawKey, flowState.customEndpoint, forceRefresh, model);
+      flowState.voices = vRes?.voices || [];
+      voiceSelect.innerHTML = '';
+
+      if (!flowState.voices.length) {
+        voiceSelect.appendChild(el('option', { value: '' }, '✕ No voices available for this model right now'));
+        flowState.selectedVoice = '';
+        return;
+      }
+
+      flowState.voices.forEach(v => {
+        const gender = (v.gender || 'neutral').toLowerCase();
+        const gIcon = gender === 'male' ? '♂' : gender === 'female' ? '♀' : '⚪';
+        const langs = Array.isArray(v.langs) && v.langs.length ? v.langs.join('/') : '';
+        const label = `♫ ${v.name || v.id} — ${gIcon} ${gender}${langs ? ' · 🌐 ' + langs : ''}${v.verified ? ' ✓' : ''}`;
+        voiceSelect.appendChild(el('option', { value: v.id }, label));
+      });
+
+      const keep = flowState.selectedVoice && flowState.voices.find(v => v.id === flowState.selectedVoice);
+      flowState.selectedVoice = keep ? flowState.selectedVoice : flowState.voices[0].id;
+      voiceSelect.value = flowState.selectedVoice;
+      saveVoiceKeyBtn.style.display = flowState.tested ? 'inline-flex' : 'none';
+    } catch (err) {
+      const msg = err.message || String(err);
+      voiceSelect.innerHTML = '';
+      voiceSelect.appendChild(el('option', { value: '' }, '✕ Voice fetch failed'));
+      flowState.voices = [];
+      flowState.selectedVoice = '';
+
+      // Paid-tier / free-tier message — show the exact guidance the user asked for
+      if (/paid|billing|free tier/i.test(msg)) {
+        setStatus('💳 ' + msg, 'err');
+        toast('💳 ' + msg.split('Options:')[0].trim(), true);
+      } else if (/stt|whisper/i.test(msg) && /groq/i.test(msg)) {
+        // This model cannot do STT → offer Groq Whisper key field
+        showSttFallback('Is model mein STT (REST) support nahi hai — Groq Whisper key add karein ya Live API model use karein:');
+        setStatus('🎧 ' + msg, 'err');
+      } else {
+        setStatus('✕ ' + msg, 'err');
+      }
+    }
+  }
+
+  // AUTO-REFRESH: silently re-fetch models+voices every 2 minutes while the flow is open,
+  // so the dropdowns always hold the CURRENTLY available real data (nothing expired).
+  let autoRefreshTimer = null;
+  function startAutoRefresh() {
+    stopAutoRefresh();
+    autoRefreshTimer = setInterval(() => {
+      if (flowState.isValidated && !flowState.loadingVoices && document.body.contains(refreshVoicesBtn)) {
+        fetchLiveVoicesAndModels(true).catch(() => {});
+      } else {
+        stopAutoRefresh();
+      }
+    }, 2 * 60 * 1000);
+  }
+  function stopAutoRefresh() {
+    if (autoRefreshTimer) { clearInterval(autoRefreshTimer); autoRefreshTimer = null; }
+  }
+
   refreshVoicesBtn.onclick = () => fetchLiveVoicesAndModels(true);
+
+  // MODEL SELECTED → immediately load that model's live voice list (Step 6 requirement)
+  modelSelect.addEventListener('change', () => {
+    flowState.selectedModel = modelSelect.value;
+    flowState.tested = false;
+    saveVoiceKeyBtn.style.display = 'none';
+    hideSttFallback();
+    const m = flowState.models.find(x => x.id === flowState.selectedModel);
+    if (m && !m.isLiveCapable && !m.isDedicatedTts) {
+      showSttFallback('Yeh chat/vision model hai — voice ke liye Live ⚡ ya TTS ✦ model chunein. STT ke liye Groq Whisper key:');
+    }
+    setStatus('Model changed to <b>' + flowState.selectedModel + '</b> — fetching its live voices…', 'spin');
+    refreshVoicesForModel(flowState.selectedModel, true);
+  });
 
   voiceSelect.addEventListener('change', () => {
     flowState.selectedVoice = voiceSelect.value;
     flowState.tested = false;
     saveVoiceKeyBtn.style.display = 'none';
-    setStatus('Voice changed to <b>' + flowState.selectedVoice + '</b>. Run test call to verify audio playback.', 'spin');
-  });
-
-  modelSelect.addEventListener('change', () => {
-    flowState.selectedModel = modelSelect.value;
-    flowState.tested = false;
-    saveVoiceKeyBtn.style.display = 'none';
-    setStatus('Model changed to <b>' + flowState.selectedModel + '</b>. Run test call to verify.', 'spin');
+    setStatus('Voice set: <b>' + flowState.selectedVoice + '</b> — Jarvis abhi isi voice mein bolega. Test call run karein.', 'spin');
   });
 
   // Step 7: Test Voice Call (MANDATORY TEST: Generates tiny audio & plays it)
@@ -2359,13 +2476,35 @@ async function renderVoice(container) {
         customEndpoint: flowState.customEndpoint
       });
 
+      // If the user supplied a Groq Whisper key in the STT fallback field, save it too
+      // (covers models that cannot do STT via REST — e.g. Live/native-audio models).
+      const groqFallbackKey = sttFallbackKeyInput.value.trim();
+      if (groqFallbackKey && fetchLiveVoicesAndModels._sttFallbackActive) {
+        try {
+          await window.jarvis.voice.saveKey({
+            provider: 'groq',
+            keyName: keyLabel + ' — Groq Whisper STT',
+            rawKey: groqFallbackKey,
+            selectedVoice: null,
+            selectedModel: 'whisper-large-v3',
+            customEndpoint: null
+          });
+          toast('✓ Groq Whisper STT key bhi voice vault mein save ho gayi!');
+        } catch (groqErr) {
+          console.warn('Groq STT key save failed:', groqErr);
+        }
+      }
+
       toast(`✓ ${keyLabel} successfully saved into voice vault!`);
-      setStatus('✓ Voice key saved & activated in fallback priority chain!', 'ok');
+      setStatus('✓ Voice key saved & activated in fallback priority chain! Jarvis ab <b>' + (flowState.selectedVoice || 'selected') + '</b> voice mein bolega.', 'ok');
 
       // Reset form
       rawKeyInput.value = '';
       keyLabelInput.value = '';
       customEndpointInput.value = '';
+      sttFallbackKeyInput.value = '';
+      hideSttFallback();
+      stopAutoRefresh();
       flowState.rawKey = '';
       flowState.isValidated = false;
       flowState.tested = false;
@@ -2387,19 +2526,26 @@ async function renderVoice(container) {
     }
   };
 
-  // Assemble Discovery / Selection Section
+  // Assemble Discovery / Selection Section (MODEL first, then VOICES for that model)
   discoverySection.append(
     el('div', { class: 'form-label' },
       el('span', { class: 'step-num-badge' }, '2'),
-      'LIVE DISCOVERED VOICES (TTS) & MODELS (STT/TTS) — MANDATORY PLAY TEST'
+      'LIVE SPEECH MODELS (fetched in real time — Live ⚡ / TTS ✦ / audio-capable only)'
+    ),
+    el('div', { style: 'display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px' },
+      modelSelect,
+      refreshVoicesBtn
+    ),
+    el('div', { class: 'form-label' },
+      el('span', { class: 'step-num-badge' }, '3'),
+      'LIVE VOICES FOR SELECTED MODEL — gender ♂/♀ + language 🌐 tags included'
     ),
     el('div', { style: 'display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px' },
       voiceSelect,
-      modelSelect,
-      refreshVoicesBtn,
       testVoiceBtn,
       saveVoiceKeyBtn
-    )
+    ),
+    sttFallbackRow
   );
 
   // Assemble Flow Box

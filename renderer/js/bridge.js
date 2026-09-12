@@ -737,7 +737,7 @@
         return { valid: false, error: 'Invalid key length' };
       },
 
-      fetchVoices: async (provider, key, customEndpoint = null) => {
+      fetchVoices: async (provider, key, customEndpoint = null, forceRefresh = false, model = null) => {
         if (provider === 'elevenlabs' && key) {
           try {
             const res = await fetch('https://api.elevenlabs.io/v1/voices', { headers: { 'xi-api-key': key.trim() } });
@@ -758,15 +758,77 @@
           }
         }
 
-        if (provider === 'gemini') {
+        // Gemini: REAL voice discovery — probe the selected model with real API calls.
+        // A voice is only returned after a real generateContent call with that voice succeeds.
+        if (provider === 'gemini' && key) {
+          const CATALOG = [
+            ['Zephyr', 'Bright', 'female'], ['Puck', 'Upbeat', 'male'], ['Charon', 'Informative', 'male'],
+            ['Kore', 'Firm', 'female'], ['Fenrir', 'Excitable', 'male'], ['Leda', 'Youthful', 'female'],
+            ['Orus', 'Firm', 'male'], ['Aoede', 'Breezy', 'female'], ['Callirrhoe', 'Easy-going', 'female'],
+            ['Autonoe', 'Bright', 'female'], ['Enceladus', 'Breathy', 'male'], ['Iapetus', 'Clear', 'male'],
+            ['Umbriel', 'Easy-going', 'male'], ['Algieba', 'Smooth', 'male'], ['Despina', 'Smooth', 'female'],
+            ['Erinome', 'Clear', 'female'], ['Algenib', 'Gravelly', 'male'], ['Rasalgethi', 'Informative', 'male'],
+            ['Laomedeia', 'Upbeat', 'female'], ['Achernar', 'Soft', 'female'], ['Alnilam', 'Firm', 'male'],
+            ['Schedar', 'Even', 'male'], ['Gacrux', 'Mature', 'female'], ['Pulcherrima', 'Forward', 'female'],
+            ['Achird', 'Friendly', 'male'], ['Zubenelgenubi', 'Casual', 'male'], ['Vindemiatrix', 'Gentle', 'female'],
+            ['Sadachbia', 'Lively', 'male'], ['Sadaltager', 'Knowledgeable', 'male'], ['Sulafat', 'Warm', 'female']
+          ];
+          const cleanModel = String(model || 'gemini-2.5-flash-preview-tts').replace(/^(models\/)+/i, '').trim();
+          const isLiveModel = /live|native-audio|realtime|bidi/i.test(cleanModel);
+          const isTtsModel = /tts/i.test(cleanModel);
+          if (!isLiveModel && !isTtsModel) {
+            throw new Error('Model "' + cleanModel + '" does not produce speech output. Select a Live ⚡ or TTS ✦ model for voice discovery.');
+          }
+          if (isLiveModel) {
+            // Live models cannot be voice-probed over REST; their voices are the same
+            // documented Gemini Voice Library — verified at session setup time instead.
+            return {
+              voices: CATALOG.map(([id, style, gender]) => ({
+                id, name: id + ' (' + style + ')', gender, style,
+                langs: ['Urdu', 'English', 'Hindi'], verified: false,
+                verifiedVia: 'live-session-setup', model: cleanModel, isLiveModel: true
+              })),
+              cached: false
+            };
+          }
+          const probe = async (voiceName) => {
+            try {
+              const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:generateContent?key=${encodeURIComponent(key.trim())}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  contents: [{ role: 'user', parts: [{ text: 'Hi' }] }],
+                  generationConfig: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } } }
+                })
+              });
+              if (res.ok) return { ok: true };
+              const errText = await res.text().catch(() => '');
+              return { ok: false, status: res.status, errText };
+            } catch (e) {
+              return { ok: false, status: 0, errText: e.message };
+            }
+          };
+          const probeCandidates = ['Puck', 'Kore', 'Charon', 'Aoede', 'Fenrir', 'Leda'];
+          const succeeded = [];
+          for (const v of probeCandidates) {
+            const r = await probe(v);
+            if (r.ok) succeeded.push(v);
+            else if (r.status === 429 || /billing|paid|permission/i.test(r.errText)) {
+              throw new Error('PAID MODEL / QUOTA: "' + cleanModel + '" ne voice probe reject ki — ' + (r.errText || '').slice(0, 200) + '. Billing add karein ya free-tier model chunein.');
+            } else if (/no longer available|not found/i.test(r.errText)) {
+              throw new Error('Model "' + cleanModel + '" ab available nahi (retired/404). Model list refresh karein aur doosra model chunein.');
+            }
+          }
+          if (!succeeded.length) {
+            throw new Error('Model "' + cleanModel + '" ne har known Gemini voice reject kar di — yeh speech model nahi lagta. Doosra model chunein.');
+          }
           return {
-            voices: [
-              { id: 'Puck', name: 'Puck (Engaging, Clear & Modern)', gender: 'neutral' },
-              { id: 'Charon', name: 'Charon (Deep, Authoritative & Warm)', gender: 'male' },
-              { id: 'Kore', name: 'Kore (Calm, Gentle & Professional)', gender: 'female' },
-              { id: 'Fenrir', name: 'Fenrir (Energetic, Focused & Crisp)', gender: 'male' },
-              { id: 'Aoede', name: 'Aoede (Expressive, Friendly & Melodic)', gender: 'female' }
-            ],
+            voices: CATALOG.map(([id, style, gender]) => ({
+              id, name: id + ' (' + style + ')', gender, style,
+              langs: ['Urdu', 'English', 'Hindi'],
+              verified: succeeded.includes(id),
+              verifiedVia: 'rest-tts-probe', model: cleanModel, isLiveModel: false
+            })),
             cached: false
           };
         }
@@ -798,18 +860,50 @@
         };
       },
 
-      fetchModels: async (provider, key, customEndpoint = null) => {
+      fetchModels: async (provider, key, customEndpoint = null, forceRefresh = false, category = 'tts') => {
         if (provider === 'gemini' && key) {
           try {
-            const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${key.trim()}`);
+            const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key.trim())}&pageSize=1000`);
             if (res.ok) {
               const data = await res.json();
+              const EXCLUDED = ['embedding', 'aqa', 'imagen', 'veo', 'robotics', 'lyria', 'nano-banana', 'computer-use', 'image-generation'];
+              const RETIRED = ['gemini-2.0-flash-live-001', 'gemini-2.5-flash-preview-tts', 'gemini-2.5-pro-preview-tts'];
               const models = (data.models || [])
-                .filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
                 .map(m => {
                   const id = (m.name || '').replace(/^(models\/)+/i, '').trim();
-                  return { id, name: m.displayName ? `${m.displayName} (${id})` : id };
+                  const methods = m.supportedGenerationMethods || [];
+                  const lowerId = id.toLowerCase();
+                  const isLiveCapable = methods.includes('bidiGenerateContent') || /live|native-audio|realtime/.test(lowerId);
+                  const isDedicatedTts = /tts/.test(lowerId);
+                  return { m, id, methods, lowerId, isLiveCapable, isDedicatedTts };
+                })
+                .filter(({ m, methods, lowerId }) => {
+                  if (RETIRED.some(p => lowerId.includes(p))) return false;
+                  if (EXCLUDED.some(ex => lowerId.includes(ex) || (m.displayName || '').toLowerCase().includes(ex))) return false;
+                  if (category === 'live') return methods.includes('bidiGenerateContent') || isLiveCapable;
+                  if (category === 'tts') return isDedicatedTts || isLiveCapable || methods.includes('generateContent');
+                  if (category === 'stt') return !/native-audio|bidi-only/.test(lowerId) && methods.includes('generateContent');
+                  return methods.includes('generateContent') || methods.includes('bidiGenerateContent');
+                })
+                .map(({ m, id, methods, isLiveCapable, isDedicatedTts }) => {
+                  let badge = isDedicatedTts ? ' [Text-to-Speech ✦]' : isLiveCapable ? ' [Live API Dialog ⚡]' : ' [Multimodal ✦]';
+                  return {
+                    id,
+                    name: m.displayName ? `${m.displayName} (${id})${badge}` : `${id}${badge}`,
+                    description: m.description || '',
+                    supportedGenerationMethods: methods,
+                    isLiveCapable,
+                    isDedicatedTts,
+                    isRetired: false
+                  };
                 });
+              models.sort((a, b) => {
+                if (a.isLiveCapable && !b.isLiveCapable) return -1;
+                if (!a.isLiveCapable && b.isLiveCapable) return 1;
+                if (a.isDedicatedTts && !b.isDedicatedTts) return -1;
+                if (!a.isDedicatedTts && b.isDedicatedTts) return 1;
+                return a.id.localeCompare(b.id);
+              });
               return { models, cached: false };
             }
           } catch (e) {
