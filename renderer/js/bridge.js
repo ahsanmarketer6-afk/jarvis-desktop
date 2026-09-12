@@ -941,19 +941,19 @@
 
         if (!stt) {
           if (tts && tts.provider === 'gemini') {
-            stt = { id: tts.id, provider: 'gemini', key_name: `${tts.key_name} (Auto-reused)`, selected_model: 'gemini-2.0-flash' };
+            stt = { id: tts.id, provider: 'gemini', key_name: `${tts.key_name} (Auto-reused)`, selected_model: tts.selected_model || null };
             isReused = true;
             reusedSource = 'Voice Gemini Key';
           } else if (geminiBrain) {
-            stt = { id: geminiBrain.id, provider: 'gemini', key_name: `${geminiBrain.key_name} (Brain Gemini)`, selected_model: 'gemini-2.0-flash' };
+            stt = { id: geminiBrain.id, provider: 'gemini', key_name: `${geminiBrain.key_name} (Brain Gemini)`, selected_model: geminiBrain.selected_model || null };
             isReused = true;
             reusedSource = 'Brain Gemini Key';
           }
         }
 
         return {
-          tts: tts ? { id: tts.id, provider: tts.provider, keyName: tts.key_name, voice: tts.selected_voice || 'Puck', model: tts.selected_model || 'gemini-2.0-flash' } : null,
-          stt: stt ? { id: stt.id, provider: stt.provider, keyName: stt.key_name || stt.keyName, model: stt.selected_model || 'gemini-2.0-flash', isReused, reusedSource } : null,
+          tts: tts ? { id: tts.id, provider: tts.provider, keyName: tts.key_name, voice: tts.selected_voice || 'Puck', model: tts.selected_model || null } : null,
+          stt: stt ? { id: stt.id, provider: stt.provider, keyName: stt.key_name || stt.keyName, model: stt.selected_model || stt.model || null, isReused, reusedSource } : null,
           live: { available: true, hasGeminiKey: true }
         };
       },

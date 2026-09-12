@@ -259,7 +259,7 @@ class VoiceManager {
       keyName: (geminiVoice || geminiBrain).key_name,
       maskedKey: (geminiVoice || geminiBrain).raw_key ? ((geminiVoice || geminiBrain).raw_key.slice(0, 4) + '••••••••' + (geminiVoice || geminiBrain).raw_key.slice(-3)) : '••••••••',
       rawKey: (geminiVoice || geminiBrain).raw_key,
-      model: (geminiVoice || geminiBrain).selected_model || 'gemini-2.0-flash'
+      model: (geminiVoice || geminiBrain).selected_model || null
     } : null;
 
     if (!sttKey) {
@@ -269,7 +269,7 @@ class VoiceManager {
           provider: 'gemini',
           keyName: `${geminiVoice.key_name} (Auto-reused)`,
           voice: geminiVoice.selected_voice,
-          model: geminiVoice.selected_model || 'gemini-2.0-flash',
+          model: geminiVoice.selected_model || null,
           customEndpoint: geminiVoice.custom_endpoint
         };
         isReused = true;
@@ -279,7 +279,7 @@ class VoiceManager {
           id: geminiBrain.id,
           provider: 'gemini',
           keyName: `${geminiBrain.key_name} (Brain Gemini)`,
-          model: 'gemini-2.0-flash',
+          model: geminiBrain.selected_model || null,
           customEndpoint: null
         };
         isReused = true;
@@ -289,7 +289,7 @@ class VoiceManager {
           id: groqBrain.id,
           provider: 'groq',
           keyName: `${groqBrain.key_name} (Brain Groq)`,
-          model: 'whisper-large-v3',
+          model: groqBrain.selected_model || null,
           customEndpoint: null
         };
         isReused = true;
@@ -299,7 +299,7 @@ class VoiceManager {
           id: openaiBrain.id,
           provider: 'openai',
           keyName: `${openaiBrain.key_name} (Brain OpenAI)`,
-          model: 'whisper-1',
+          model: openaiBrain.selected_model || null,
           customEndpoint: null
         };
         isReused = true;
@@ -315,14 +315,14 @@ class VoiceManager {
         provider: ttsKey.provider,
         keyName: ttsKey.key_name,
         voice: ttsKey.selected_voice || 'Puck',
-        model: ttsKey.selected_model || 'gemini-2.0-flash',
+        model: ttsKey.selected_model || null,
         customEndpoint: ttsKey.custom_endpoint
       } : null,
       stt: sttKey ? {
         id: sttKey.id,
         provider: sttKey.provider,
         keyName: sttKey.keyName || sttKey.key_name,
-        model: sttKey.model || sttKey.selected_model || 'gemini-2.0-flash',
+        model: sttKey.model || sttKey.selected_model || null,
         customEndpoint: sttKey.custom_endpoint || null,
         isReused,
         reusedSource
@@ -360,12 +360,16 @@ class VoiceManager {
       throw new Error('Could not find decrypted Gemini key.');
     }
 
+    // Probe/query live STT models for this key to select best active STT model
+    const liveModels = await this.getModels('gemini', rawKey, { category: 'stt' }).catch(() => []);
+    const selectedModel = liveModels[0]?.id || null;
+
     const saveRes = await this.saveKey({
       provider: 'gemini',
       keyName,
       rawKey,
       selectedVoice: 'Puck',
-      selectedModel: 'gemini-2.0-flash',
+      selectedModel,
       priority: 1
     });
 
@@ -392,7 +396,11 @@ class VoiceManager {
       throw new Error('No active Google AI (Gemini) key found. Please add a Gemini key in the Voice API or Brain tab to use Live Mode.');
     }
 
-    const useModel = model || geminiVoiceKey?.selected_model || 'gemini-2.0-flash-exp';
+    let useModel = model || geminiVoiceKey?.selected_model;
+    if (!useModel) {
+      const liveModels = await this.getModels('gemini', rawKey, { category: 'live' }).catch(() => []);
+      useModel = liveModels[0]?.id;
+    }
     const useVoice = voice || geminiVoiceKey?.selected_voice || 'Puck';
 
     return await this.liveSession.startSession({
@@ -520,7 +528,7 @@ class VoiceManager {
             provider: candidate.provider,
             key_name: candidate.key_name,
             raw_key: candidate.raw_key,
-            selected_model: candidate.provider === 'gemini' ? 'gemini-2.0-flash' : (candidate.provider === 'groq' ? 'whisper-large-v3' : 'whisper-1'),
+            selected_model: candidate.selected_model || null,
             custom_endpoint: null
           }];
           console.log(`[VoiceManager] STT: Automatically reusing active ${candidate.provider} brain key "${candidate.key_name}" for STT transcription.`);

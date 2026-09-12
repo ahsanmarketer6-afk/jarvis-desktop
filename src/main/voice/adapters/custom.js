@@ -104,7 +104,11 @@ class CustomVoiceAdapter extends BaseVoiceAdapter {
     const t0 = Date.now();
     const endpoint = this.getEndpoint(options);
     const cleanKey = String(key || '').trim();
-    const model = options.model || 'tts-1';
+    let model = options.model;
+    if (!model) {
+      const models = await this.fetchModels(cleanKey, { ...options, category: 'tts' }).catch(() => []);
+      model = models[0]?.id || 'tts-1';
+    }
 
     // Try OpenAI-compatible /v1/audio/speech or /audio/speech
     const url = endpoint.includes('/v1') ? `${endpoint}/audio/speech` : `${endpoint}/v1/audio/speech`;

@@ -72,10 +72,14 @@ class GroqVoiceAdapter extends BaseVoiceAdapter {
     }
   }
 
-  async transcribe(key, model = 'whisper-large-v3', audioData, options = {}) {
+  async transcribe(key, model = null, audioData, options = {}) {
     const t0 = Date.now();
     const cleanKey = String(key).trim();
-    const useModel = model || 'whisper-large-v3';
+    let useModel = model;
+    if (!useModel) {
+      const models = await this.fetchModels(cleanKey).catch(() => []);
+      useModel = models[0]?.id || 'whisper-large-v3';
+    }
 
     let buffer;
     if (Buffer.isBuffer(audioData)) {

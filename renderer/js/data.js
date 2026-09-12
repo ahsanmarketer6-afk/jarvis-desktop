@@ -83,7 +83,7 @@ const CONNECTED_APPS = [
 ];
 
 const BRAIN_PROVIDERS = [
-  { name: 'Gemini', model: 'gemini-2.0-flash', keys: [
+  { name: 'Gemini', model: 'Auto-detected', keys: [
     { label: 'Gemini Key 1', val: 'AIzaSyB••••••••••••••••••••••••3xQ', used: 41, quota: 100 },
     { label: 'Gemini Key 2', val: 'AIzaSyB••••••••••••••••••••••••7kP', used: 12, quota: 100 }
   ]},

@@ -1831,7 +1831,7 @@ async function renderVoice(container) {
       stt
         ? el('div', { style: 'font-size:10px;color:var(--muted);line-height:1.4' },
             el('div', { style: 'color:#fff;font-weight:600' }, (sttMeta?.glyph || '🎙') + ' ' + (stt.keyName || sttMeta?.name || 'Speech-to-Text')),
-            el('div', {}, 'Model: <b style="color:var(--mint);font-family:var(--font-mono)">' + (stt.model || 'gemini-2.0-flash') + '</b>' + (stt.isReused ? ' <span style="color:#a8d1ff;font-size:9px">(Reused from ' + (stt.reusedSource || 'Gemini') + ')</span>' : ''))
+            el('div', {}, 'Model: <b style="color:var(--mint);font-family:var(--font-mono)">' + (stt.model || 'Auto-detected') + '</b>' + (stt.isReused ? ' <span style="color:#a8d1ff;font-size:9px">(Reused from ' + (stt.reusedSource || 'Gemini') + ')</span>' : ''))
           )
         : el('div', { style: 'font-size:9.5px;color:#ff8888;line-height:1.4' },
             'Jarvis sunne ke liye active STT key chahiye.'

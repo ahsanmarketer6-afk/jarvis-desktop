@@ -59,7 +59,25 @@ class GeminiLiveSessionManager extends EventEmitter {
     }
 
     const cleanKey = String(apiKey).trim();
-    const cleanModel = (model || 'gemini-2.0-flash-exp').replace(/^(models\/)+/i, '');
+    let cleanModel = model ? String(model).replace(/^(models\/)+/i, '') : null;
+
+    if (!cleanModel) {
+      try {
+        const GeminiVoiceAdapter = require('./adapters/gemini');
+        const adapter = new GeminiVoiceAdapter();
+        const liveModels = await adapter.fetchModels(cleanKey, { category: 'live' });
+        if (liveModels && liveModels.length > 0) {
+          cleanModel = liveModels[0].id;
+        }
+      } catch (e) {
+        console.warn('[Gemini Live API] Could not dynamically probe live models:', e.message);
+      }
+    }
+
+    if (!cleanModel) {
+      throw new Error('No active Live API capable model found for this Gemini key. Please select a Live model from the UI.');
+    }
+
     this.sessionConfig = { model: cleanModel, voice, apiKey: cleanKey, systemInstruction };
 
     return this.connectWebSocket();

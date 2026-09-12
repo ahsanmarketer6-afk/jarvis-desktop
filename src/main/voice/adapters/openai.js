@@ -102,7 +102,11 @@ class OpenAIVoiceAdapter extends BaseVoiceAdapter {
   async synthesize(key, voice = 'alloy', text, options = {}) {
     const t0 = Date.now();
     const cleanKey = String(key).trim();
-    const model = options.model || 'tts-1';
+    let model = options.model;
+    if (!model) {
+      const models = await this.fetchModels(cleanKey, { category: 'tts' }).catch(() => []);
+      model = models[0]?.id || 'tts-1';
+    }
     const speed = options.speed ?? 1.0;
 
     const url = `${this.baseUrl}/audio/speech`;
@@ -141,10 +145,14 @@ class OpenAIVoiceAdapter extends BaseVoiceAdapter {
     };
   }
 
-  async transcribe(key, model = 'whisper-1', audioData, options = {}) {
+  async transcribe(key, model = null, audioData, options = {}) {
     const t0 = Date.now();
     const cleanKey = String(key).trim();
-    const useModel = model || 'whisper-1';
+    let useModel = model;
+    if (!useModel) {
+      const models = await this.fetchModels(cleanKey, { category: 'stt' }).catch(() => []);
+      useModel = models[0]?.id || 'whisper-1';
+    }
 
     let buffer;
     if (Buffer.isBuffer(audioData)) {
