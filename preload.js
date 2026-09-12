@@ -88,6 +88,30 @@ contextBridge.exposeInMainWorld('jarvis', {
         });
     }
   },
+  // Phase 5: Memory + Backup
+  memory: {
+    add: (content, type, importance) => ipcRenderer.invoke('memory:add', { content, type, importance }),
+    list: (opts) => ipcRenderer.invoke('memory:listV2', opts || {}),
+    update: (id, patch) => ipcRenderer.invoke('memory:updateV2', id, patch || {}),
+    delete: (id) => ipcRenderer.invoke('memory:deleteV2', id),
+    deleteAll: () => ipcRenderer.invoke('memory:deleteAllV2'),
+    stats: () => ipcRenderer.invoke('memory:stats'),
+    recall: (query, opts) => ipcRenderer.invoke('memory:recall', query, opts || {}),
+    setAutoExtract: (on) => ipcRenderer.invoke('memory:setAutoExtract', on),
+    getAutoExtract: () => ipcRenderer.invoke('memory:getAutoExtract'),
+    extractNow: () => ipcRenderer.invoke('memory:extractNow')
+  },
+  backup: {
+    create: (opts) => ipcRenderer.invoke('backup:create', opts || {}),
+    inspect: (filePath) => ipcRenderer.invoke('backup:inspect', filePath),
+    restore: (filePath) => ipcRenderer.invoke('backup:restore', filePath),
+    history: () => ipcRenderer.invoke('backup:history'),
+    getSettings: () => ipcRenderer.invoke('backup:getSettings'),
+    setSettings: (patch) => ipcRenderer.invoke('backup:setSettings', patch || {}),
+    pickFile: () => ipcRenderer.invoke('backup:pickFile'),
+    pickRestore: () => ipcRenderer.invoke('backup:pickRestore'),
+    pickDir: () => ipcRenderer.invoke('backup:pickDir')
+  },
   // Phase 4: Orchestrator + Agent Framework
   orch: {
     run: (request, opts = {}, onProgress = null) => {

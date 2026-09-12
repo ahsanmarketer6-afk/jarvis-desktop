@@ -11,9 +11,36 @@ const db = require('./src/main/database');
 const { brainManager } = require('./src/main/brain');
 const { voiceManager } = require('./src/main/voice');
 const orchestrator = require('./src/main/orchestrator');
+const memoryManager = require('./src/main/memory/manager');
+const backupManager = require('./src/main/memory/backup');
+require('./src/main/memory/agents'); // Phase 5: memory/backup agents self-register
 
 // Phase 4: Orchestrator = single LLM path through BrainManager (RULE 3)
 orchestrator.attachBrain(brainManager);
+// Phase 5: MemoryManager = same single LLM path (auto-extraction etc.)
+memoryManager.attachBrain(brainManager);
+
+// Phase 5: MEMORY INJECTION at the deepest single point — wrap BrainManager.chat
+// once so Chat, Voice Standard Mode, and Orchestrator/agent tasks ALL get the
+// "Yaad-dasht" context block + turn tracking without any caller change.
+const _origBrainChat = brainManager.chat.bind(brainManager);
+brainManager.chat = async (messages, options = {}, onChunk = null, onKeySwitch = null) => {
+  try {
+    const msgs = Array.isArray(messages) ? messages : [];
+    const lastUser = [...msgs].reverse().find(m => m.role === 'user');
+    if (lastUser) memoryManager.rememberTurn('user', lastUser.content);
+    if (!options.skipMemory) {
+      const block = memoryManager.buildContextBlock(lastUser ? lastUser.content : null, { limit: 6 });
+      if (block) messages = [{ role: 'system', content: block }, ...msgs];
+    }
+    const res = await _origBrainChat(messages, options, onChunk, onKeySwitch);
+    if (res && res.text) memoryManager.rememberTurn('assistant', res.text);
+    return res;
+  } catch (e) {
+    // memory must never break an LLM call — fall through to the real path
+    return _origBrainChat(messages, options, onChunk, onKeySwitch);
+  }
+};
 
 let mainWindow = null;
 
@@ -95,10 +122,8 @@ ipcMain.handle('activity:insert', (_e, { agentName, action, details, status }) =
 });
 ipcMain.handle('activity:list', (_e, opts) => db.getActivity(opts || {}));
 
-ipcMain.handle('memory:add', (_e, item) => db.addMemory(item));
-ipcMain.handle('memory:list', (_e, opts) => db.getMemory(opts || {}));
-ipcMain.handle('memory:update', (_e, id, patch) => db.updateMemory(id, patch));
-ipcMain.handle('memory:delete', (_e, id) => db.deleteMemory(id));
+// Phase 5: legacy memory:* handlers V2 memories table par route hote hain
+// (neeche merged handler legacy {namespace, content} AUR naya {content, type} dono shapes handle karta hai)
 
 ipcMain.handle('crud:insert', (_e, table, obj) => db.insert(table, obj));
 ipcMain.handle('crud:list', (_e, table, opts) => db.list(table, opts || {}));
@@ -131,7 +156,67 @@ ipcMain.handle('brain:chat', async (event, { messages, options, requestId }) => 
     }
   };
 
+  // Phase 5 memory turn tracking happens inside the wrapped brainManager.chat
+  // (deepest single point) — nothing needed here.
   return await brainManager.chat(messages, options || {}, onChunk, onKeySwitch);
+});
+
+// ─── IPC: Memory + Backup (Phase 5) ────────────────────────────────
+// merged legacy + Phase 5 memory handler — dono shapes: {content,type,importance} | {namespace,content,encrypted,sourceAgent}
+ipcMain.handle('memory:add', (_e, item) => {
+  const it = item || {};
+  const content = it.content || '';
+  const type = it.type || (it.namespace ? String(it.namespace).toLowerCase().slice(0, 12) : 'fact');
+  return memoryManager.remember(String(content), { type: /^(fact|preference|event|relationship)$/.test(type) ? type : 'fact', source: 'manual', importance: +it.importance || 5 });
+});
+ipcMain.handle('memory:list', (_e, opts) => db.listMemories(opts || {}));
+ipcMain.handle('memory:update', (_e, id, patch) => db.updateMemoryV2(id, patch || {}));
+ipcMain.handle('memory:delete', (_e, id) => db.deleteMemoryV2(id));
+ipcMain.handle('memory:listV2', (_e, opts) => db.listMemories(opts || {}));
+ipcMain.handle('memory:updateV2', (_e, id, patch) => db.updateMemoryV2(id, patch || {}));
+ipcMain.handle('memory:deleteV2', (_e, id) => db.deleteMemoryV2(id));
+ipcMain.handle('memory:deleteAllV2', () => db.deleteAllMemoriesV2());
+ipcMain.handle('memory:stats', () => db.getMemoryStatsV2());
+ipcMain.handle('memory:recall', (_e, query, opts) => memoryManager.recall(query, opts || {}));
+ipcMain.handle('memory:setAutoExtract', (_e, on) => memoryManager.setAutoExtract(on));
+ipcMain.handle('memory:getAutoExtract', () => memoryManager.autoExtractEnabled);
+ipcMain.handle('memory:extractNow', () => memoryManager.extractFromRecent());
+
+ipcMain.handle('backup:create', (_e, opts) => backupManager.createBackup(opts || {}));
+ipcMain.handle('backup:inspect', (_e, filePath) => backupManager.inspectBackup(filePath));
+ipcMain.handle('backup:restore', (_e, filePath) => backupManager.restoreBackup(filePath));
+ipcMain.handle('backup:history', () => db.listBackupHistory({}));
+ipcMain.handle('backup:getSettings', () => ({
+  autoEnabled: backupManager.getAutoEnabled(),
+  autoDir: backupManager.getAutoDir(),
+  retention: backupManager.getRetention()
+}));
+ipcMain.handle('backup:setSettings', (_e, patch) => {
+  if (patch.autoEnabled !== undefined) backupManager.setAutoEnabled(patch.autoEnabled);
+  if (patch.autoDir !== undefined) backupManager.setAutoDir(patch.autoDir);
+  if (patch.retention !== undefined) backupManager.setRetention(patch.retention);
+  return { autoEnabled: backupManager.getAutoEnabled(), autoDir: backupManager.getAutoDir(), retention: backupManager.getRetention() };
+});
+ipcMain.handle('backup:pickFile', async () => {
+  const { dialog } = require('electron');
+  const r = await dialog.showSaveDialog(mainWindow, {
+    title: 'Backup save karein', defaultPath: `jarvis-backup-${new Date().toISOString().slice(0, 10)}.jarvisbak`,
+    filters: [{ name: 'JARVIS Backup', extensions: ['jarvisbak'] }]
+  });
+  return r.canceled ? null : r.filePath;
+});
+ipcMain.handle('backup:pickRestore', async () => {
+  const { dialog } = require('electron');
+  const r = await dialog.showOpenDialog(mainWindow, {
+    title: 'Restore karne ke liye .jarvisbak chunein',
+    filters: [{ name: 'JARVIS Backup', extensions: ['jarvisbak'] }], properties: ['openFile']
+  });
+  return r.canceled ? null : r.filePaths[0];
+});
+ipcMain.handle('backup:pickDir', async () => {
+  const { dialog } = require('electron');
+  const r = await dialog.showOpenDialog(mainWindow, { title: 'Auto-backup folder chunein', properties: ['openDirectory'] });
+  return r.canceled ? null : r.filePaths[0];
 });
 
 // ─── IPC: Orchestrator + Agent Framework (Phase 4) ─────────────────
@@ -253,6 +338,15 @@ app.whenReady().then(() => {
   } catch (e) {
     console.error('[jarvis] database init FAILED:', e);
     // app still opens; Settings panel will show "disconnected"
+  }
+
+  // Phase 5: backup system init + daily auto-backup tick (15-min check interval)
+  try {
+    backupManager.init({ db, appVersion: app.getVersion(), userDataPath: app.getPath('userData') });
+    setInterval(() => { backupManager.autoBackupTick().catch(() => {}); }, 15 * 60 * 1000);
+    setTimeout(() => { backupManager.autoBackupTick().catch(() => {}); }, 60 * 1000);
+  } catch (e) {
+    console.error('[jarvis] backup init failed:', e.message);
   }
 
   wireUpdater();

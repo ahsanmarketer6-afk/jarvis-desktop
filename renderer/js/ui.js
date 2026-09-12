@@ -1195,7 +1195,7 @@ function renderChat(container) {
       panel.setRunId(res.runId);
       typingMsg.typing = false;
       if (!typingMsg.text && res && res.result) typingMsg.text = res.result;
-      if (res && res.classification) typingMsg.tag = `Orchestrator · ${res.classification}`;
+      if (res && res.classification) typingMsg.tag = (res.classification === 'memory' ? '📌 ' : 'Orchestrator · ') + res.classification;
       panel.finish(true, res.classification || 'done');
       if (typingMsg.text) speakResponse(typingMsg.text);
     } catch (err) {
@@ -2993,111 +2993,127 @@ async function renderVoice(container) {
 function renderMemory(container) {
   container.innerHTML = '';
 
-  const search = el('input', { class: 'input', placeholder: '🔍  Search memory… (text, namespace, agent)' });
-  const wrap = el('div', { class: 'ns-grid' });
-  let items = [];
-  const hasDB = !!(window.jarvis && window.jarvis.db);
+  const search = el('input', { class: 'input', placeholder: '🔍  Search memories… (content, type)' });
+  const typeSel = el('select', { class: 'select' },
+    el('option', { value: '' }, 'ALL TYPES'),
+    el('option', { value: 'fact' }, 'FACT'),
+    el('option', { value: 'preference' }, 'PREFERENCE'),
+    el('option', { value: 'event' }, 'EVENT'),
+    el('option', { value: 'relationship' }, 'RELATIONSHIP')
+  );
+  const statBar = el('div', { class: 'filter-row', style: 'gap:8px' });
+  const list = el('div', { class: 'run-history' });
+
+  // Manual add box — user khud apni memory likh sakta hai (Boss requirement)
+  const addBox = el('textarea', { class: 'input', style: 'min-height:70px', placeholder: 'Apni baat likho jo Jarvis hamesha yaad rakhe… e.g. "Mera naam Ahmed hai, main Karachi mein rehta hun, meri car white hai"' });
+  const addType = el('select', { class: 'select' },
+    el('option', { value: 'fact' }, 'FACT'), el('option', { value: 'preference' }, 'PREFERENCE'),
+    el('option', { value: 'event' }, 'EVENT'), el('option', { value: 'relationship' }, 'RELATIONSHIP'));
+  const addImp = el('select', { class: 'select' },
+    ...[8, 5, 3].map(n => el('option', { value: String(n) }, 'IMPORTANCE ' + n + '/10')));
+
+  const TYPE_BADGE = {
+    fact: ['blue', 'FACT'], preference: ['amber', 'PASAND'],
+    event: ['green', 'EVENT'], relationship: ['red', 'RISHTA']
+  };
 
   async function load() {
-    if (hasDB) {
-      try { items = await window.jarvis.db.memory.list({ limit: 500 }); }
-      catch (e) { toast('DB read failed: ' + e.message, true); items = []; }
-    }
-    draw();
+    let stats = { total: 0, contentBytes: 0, byType: {} };
+    let autoOn = true;
+    try {
+      [stats, autoOn] = await Promise.all([window.jarvis.memory.stats(), window.jarvis.memory.getAutoExtract()]);
+    } catch (e) { /* bridge down */ }
+    statBar.innerHTML = '';
+    statBar.append(
+      el('span', { class: 'badge green' }, `TOTAL: ${stats.total}`),
+      el('span', { class: 'badge blue' }, `SIZE: ${(stats.contentBytes / 1024).toFixed(1)} KB`),
+      ...Object.entries(stats.byType || {}).filter(([, n]) => n > 0).map(([t, n]) => el('span', { class: 'badge gray' }, `${t.toUpperCase()}: ${n}`)),
+      el('span', { style: 'flex:1' }),
+      el('label', { class: 'muted', style: 'display:flex;align-items:center;gap:6px;font-size:10px;cursor:pointer' },
+        el('input', { type: 'checkbox', checked: !!autoOn, onchange: async (e) => { await window.jarvis.memory.setAutoExtract(e.target.checked); toast('Auto-learn ' + (e.target.checked ? 'ON' : 'OFF')); } }),
+        'AUTO-LEARN')
+    );
+    await draw();
   }
 
-  function draw() {
+  async function draw() {
+    let items = [];
+    try { items = await window.jarvis.memory.list({ type: typeSel.value || null, limit: 500 }); } catch (e) { items = []; }
     const q = (search.value || '').toLowerCase();
-    wrap.innerHTML = '';
-    const groups = {};
-    items.filter(m => !q || ((m.content || '') + m.namespace + m.source_agent).toLowerCase().includes(q))
-      .forEach(m => { (groups[m.namespace] = groups[m.namespace] || []).push(m); });
-    if (!Object.keys(groups).length) {
-      wrap.appendChild(el('div', { class: 'empty' }, el('div', { class: 'e-ic' }, '▦'),
-        el('div', { class: 'e-tx' }, hasDB ? 'NO MEMORIES YET — ADD YOUR FIRST' : 'DB BRIDGE UNAVAILABLE (dev mode)')));
+    list.innerHTML = '';
+    const filtered = items.filter(m => !q || (m.content || '').toLowerCase().includes(q));
+    if (!filtered.length) {
+      list.appendChild(el('div', { class: 'empty' }, el('div', { class: 'e-ic' }, '▦'),
+        el('div', { class: 'e-tx' }, 'NO MEMORIES'), el('div', { class: 'muted' }, 'Neeche likh kar add karo, ya chat mein "yaad rakho: …" bolo')));
       return;
     }
-    Object.entries(groups).forEach(([ns, list]) => {
-      wrap.appendChild(el('div', { class: 'ns-block' },
-        el('div', { class: 'ns-head' },
-          el('span', { class: 'ns-name' }, '▤ ' + ns.toUpperCase()),
-          el('span', { class: 'muted' }, list.length + ' ENTRIES')
-        ),
-        ...list.map(m => {
-          const editText = el('textarea', { class: 'input', style: 'min-height:60px' }, m.content || '');
-          return el('div', { class: 'mem-card' },
-            el('div', { style: 'flex:1' },
-              el('div', { class: 'mem-text' }, m.content || ''),
-              el('div', { class: 'mem-meta' },
-                el('span', {}, '◷ ' + (m.created_at || '').slice(0, 10)),
-                el('span', {}, '◈ ' + m.source_agent),
-                m.encrypted ? el('span', { class: 'badge green' }, '⛨ ENCRYPTED') : null
-              )
-            ),
-            el('button', { class: 'icon-btn', title: 'Edit', onclick: async () => {
-              openModal({
-                title: 'EDIT MEMORY',
-                sub: ns.toUpperCase() + ' • ' + (m.created_at || '').slice(0, 10),
-                body: el('div', { class: 'form-row' }, editText),
-                actions: [
-                  el('button', { class: 'btn', onclick: closeModal }, 'CANCEL'),
-                  el('button', { class: 'btn primary', onclick: async () => {
-                    if (hasDB) await window.jarvis.db.memory.update(m.id, { content: editText.value });
-                    closeModal(); await load(); toast('Memory updated in database');
-                  } }, 'SAVE')
-                ]
-              });
-            }}, '✎'),
-            el('button', { class: 'icon-btn del', title: 'Delete', onclick: () =>
-              confirmModal('Delete memory?', '"' + (m.content || '').slice(0, 60) + (m.content && m.content.length > 60 ? '…' : '') + '" — database se permanently delete hoga.', async () => {
-                if (hasDB) await window.jarvis.db.memory.delete(m.id);
-                await load(); toast('Memory deleted from database');
-              })
-            }, '🗑')
-          );
-        })
-      ));
+    filtered.forEach(m => {
+      const [cls, label] = TYPE_BADGE[m.type] || ['gray', (m.type || 'note').toUpperCase()];
+      const card = el('div', { class: 'conn-card' },
+        el('div', { class: 'conn-info' },
+          el('div', { class: 'conn-name', style: 'font-size:12px' }, m.content),
+          el('div', { class: 'conn-sub' },
+            `◷ ${(m.created_at || '').slice(0, 10)} · use ${m.use_count || 0}× · importance ${m.importance}/10` +
+            (m.expires_at ? ` · expires ${String(m.expires_at).slice(0, 10)}` : ''))),
+        el('span', { class: 'badge ' + cls }, label),
+        el('button', { class: 'icon-btn', title: 'Edit', onclick: () => {
+          const ta = el('textarea', { class: 'input', style: 'min-height:70px' }, m.content);
+          const imp = el('select', { class: 'select' }, ...[1,2,3,4,5,6,7,8,9,10].map(n => el('option', { value: String(n), selected: m.importance === n }, 'IMPORTANCE ' + n + '/10')));
+          openModal({ title: 'EDIT MEMORY', sub: '#' + m.id + ' · ' + (m.type || '').toUpperCase(),
+            body: el('div', { class: 'form-row' }, ta, imp),
+            actions: [
+              el('button', { class: 'btn', onclick: closeModal }, 'CANCEL'),
+              el('button', { class: 'btn primary', onclick: async () => {
+                await window.jarvis.memory.update(m.id, { content: ta.value.trim(), importance: +imp.value });
+                closeModal(); toast('Memory update ho gayi ✅'); draw();
+              }}, 'SAVE')
+            ]
+          });
+        }}, '✎'),
+        el('button', { class: 'icon-btn del', title: 'Delete', onclick: () => {
+          confirmModal('Delete this memory?', String(m.content).slice(0, 80), async () => {
+            await window.jarvis.memory.delete(m.id); toast('Memory delete ho gayi'); draw();
+          });
+        }}, '✕')
+      );
+      list.appendChild(card);
     });
   }
-  search.oninput = draw;
-  load();
+  search.oninput = draw; typeSel.onchange = draw;
+
+  async function addMemory() {
+    const text = addBox.value.trim();
+    if (!text) { toast('Pehle kuch likho 😄', true); return; }
+    const r = await window.jarvis.memory.add(text, addType.value, +addImp.value);
+    addBox.value = '';
+    toast(r.action === 'updated' ? 'Purani memory update hui ✅ (dup tha)' : 'Yaad rakh liya ✅');
+    load();
+  }
 
   container.append(
     el('div', { class: 'panel' },
       el('div', { class: 'panel-head' },
-        el('div', { class: 'panel-title' }, el('span', { class: 'pt-ic' }, '▦'), 'MEMORY BANK', el('span', { class: 'badge green', style: 'margin-left:6px' }, '● SQLITE PERSISTENT')),
-        el('button', { class: 'btn primary', onclick: () => {
-          const nsSel = el('select', { class: 'select' }, ...['Personal', 'Workspace', 'News', 'Preferences', 'Contacts'].map(n => el('option', {}, n)));
-          const txt = el('textarea', { class: 'input', style: 'min-height:80px', placeholder: 'Yeh memory save karni hai…' });
-          const encT = el('div', { class: 'toggle' });
-          encT.onclick = () => encT.classList.toggle('on');
-          openModal({
-            title: 'ADD MEMORY',
-            sub: 'Memory database mein save hogi — restart ke baad bhi rahegi',
-            body: el('div', {},
-              el('div', { class: 'form-row' }, el('div', { class: 'form-label' }, '▤ NAMESPACE'), nsSel),
-              el('div', { class: 'form-row' }, el('div', { class: 'form-label' }, '✎ TEXT'), txt),
-              el('div', { class: 'set-row' },
-                el('div', {}, el('div', { class: 'set-label' }, 'Encrypt at rest'), el('div', { class: 'set-desc' }, 'AES-256-GCM vault encryption (machine-bound)')),
-                encT)
-            ),
-            actions: [
-              el('button', { class: 'btn', onclick: closeModal }, 'CANCEL'),
-              el('button', { class: 'btn primary', onclick: async () => {
-                if (!txt.value.trim()) { toast('Text khali hai — kuch likhein', true); return; }
-                if (hasDB) {
-                  await window.jarvis.db.memory.add({ namespace: nsSel.value, content: txt.value.trim(), encrypted: encT.classList.contains('on') ? 1 : 0, sourceAgent: 'Memory' });
-                  await window.jarvis.db.activity.insert({ agentName: 'Memory', action: 'Memory saved to ' + nsSel.value + (encT.classList.contains('on') ? ' (encrypted)' : ''), details: { namespace: nsSel.value } });
-                }
-                closeModal(); await load(); toast('Memory saved to database (' + nsSel.value + ')');
-              }}, 'SAVE TO DATABASE')
-            ]
+        el('div', { class: 'panel-title' }, el('span', { class: 'pt-ic' }, '▦'), 'MEMORY — JARVIS KI YAAD-DASHT'),
+        el('button', { class: 'btn', style: 'font-size:9px', onclick: async () => {
+          confirmModal('Delete ALL memories?', 'Saari memories permanently delete ho jayengi. Backup lena behtar hai!', async () => {
+            const n = await window.jarvis.memory.deleteAll(); toast(n + ' memories delete ho gayin'); load();
           });
-        }}, '+ ADD MEMORY')
-      ),
-      search, wrap
+        }}, '🗑 DELETE ALL'),
+        el('button', { class: 'btn primary', onclick: addMemory }, '+ ADD MEMORY')),
+      statBar,
+      el('div', { class: 'filter-row', style: 'margin:10px 0 6px' }, search, typeSel),
+      list,
+      el('div', { class: 'panel-head', style: 'margin-top:14px' },
+        el('div', { class: 'panel-title' }, el('span', { class: 'pt-ic' }, '✍'), 'KHUD MEMORY LIKHO — JARVIS HAMESHA YAAD RAKHEGA'),
+        el('span', { class: 'muted', style: 'font-size:10px' }, 'chat mein "yaad rakho: …" bhi chalta hai')),
+      el('div', { class: 'form-row' }, addBox,
+        el('div', { class: 'filter-row', style: 'margin-top:6px' }, addType, addImp,
+          el('button', { class: 'btn primary', onclick: addMemory }, '📌 YAAD RAKHO'))),
+      el('div', { class: 'form-hint', style: 'margin-top:6px' },
+        'Ye memories har conversation, voice call aur agent task mein Jarvis ke context mein hoti hain. Sirf tum edit/delete kar sakte ho.')
     )
   );
+  load();
 }
 
 /* ═══════════════════════════════════ 7. ACTIVITY LOG ═══════════════════════════════════ */
@@ -3433,11 +3449,74 @@ async function renderSettings(container) {
     });
   }
 
+  /* ── Phase 5: Backup panel ── */
+  const backupBody = el('div', { class: 'muted' }, '◌ Loading backup settings…');
+  const backupPanel = el('div', { class: 'panel mb14' },
+    el('div', { class: 'panel-title mb14' }, el('span', { class: 'pt-ic' }, '⛨'), 'BACKUP & RESTORE — data kabhi khatam nahi hoga'),
+    backupBody);
+
+  (async () => {
+    try {
+      const s = await window.jarvis.backup.getSettings();
+      const hist = await window.jarvis.backup.history();
+      const last = hist[0];
+      backupBody.innerHTML = '';
+      const autoTgl = el('div', { class: 'toggle' + (s.autoEnabled ? ' on' : '') });
+      autoTgl.onclick = async () => {
+        const ns = await window.jarvis.backup.setSettings({ autoEnabled: !s.autoEnabled });
+        s.autoEnabled = ns.autoEnabled; autoTgl.classList.toggle('on', ns.autoEnabled);
+        toast('Auto-backup ' + (ns.autoEnabled ? 'ON (roz)' : 'OFF'));
+      };
+      const retSel = el('select', { class: 'select', style: 'max-width:90px' },
+        ...[3, 7, 14, 30].map(n => el('option', { value: String(n), selected: s.retention === n }, n + ' backups')));
+      retSel.onchange = async () => { await window.jarvis.backup.setSettings({ retention: +retSel.value }); toast('Retention: ' + retSel.value); };
+
+      backupBody.append(
+        el('div', { class: 'filter-row', style: 'gap:8px' },
+          el('button', { class: 'btn primary', onclick: async () => {
+            toast('Backup ban raha hai…');
+            const file = await window.jarvis.backup.pickFile();
+            if (!file) return;
+            try { const r = await window.jarvis.backup.create({ filePath: file, type: 'manual' }); toast('✅ Backup: ' + r.counts.memories + ' memories, ' + r.counts.keys + ' keys saved'); }
+            catch (e) { toast('Backup fail: ' + e.message, true); }
+          }}, '⛨ BACKUP BANAO'),
+          el('button', { class: 'btn', onclick: async () => {
+            const file = await window.jarvis.backup.pickRestore();
+            if (!file) return;
+            const info = await window.jarvis.backup.inspect(file);
+            if (!info.ok) { toast(info.error, true); return; }
+            confirmModal('Restore karein?', `Backup mein: ${info.counts.memories ?? 0} memories, ${info.counts.keys ?? 0} brain keys, ${info.counts.voiceKeys ?? 0} voice keys (schema v${info.schemaVersion}). Current data ki safety backup bhi banegi.`, async () => {
+              try {
+                await window.jarvis.backup.restore(file);
+                toast('✅ Restore complete — app reload ho raha hai…');
+                setTimeout(() => window.location.reload(), 1500);
+              } catch (e) { toast('Restore fail: ' + e.message, true); }
+            });
+          }}, '↺ RESTORE KARO')),
+        el('div', { class: 'set-row', style: 'margin-top:10px' },
+          el('div', {}, el('div', { class: 'set-label' }, 'Auto-backup (roz)'), el('div', { class: 'set-desc' }, 'Folder: ' + s.autoDir)),
+          el('div', { style: 'display:flex;gap:8px;align-items:center' },
+            el('button', { class: 'btn', style: 'font-size:9px', onclick: async () => {
+              const dir = await window.jarvis.backup.pickDir();
+              if (dir) { const ns = await window.jarvis.backup.setSettings({ autoDir: dir }); toast('Folder: ' + ns.autoDir); }
+            }}, '📁 FOLDER'), autoTgl)),
+        el('div', { class: 'set-row' },
+          el('div', {}, el('div', { class: 'set-label' }, 'Retention'), el('div', { class: 'set-desc' }, 'Purane auto-backups rotate ho jate hain')),
+          retSel),
+        el('div', { class: 'form-hint', style: 'margin-top:8px' },
+          last ? `Last backup: ${last.type} · ${String(last.created_at).slice(0, 16)} · ${((last.file_size || 0) / 1024).toFixed(0)} KB · ${last.status}` : 'Abhi koi backup nahi bana')
+      );
+    } catch (e) {
+      backupBody.textContent = '✕ Backup bridge unavailable: ' + e.message;
+    }
+  })();
+
   container.append(
     el('div', { class: 'panel mb14' },
       el('div', { class: 'panel-title mb14' }, el('span', { class: 'pt-ic' }, '⛁'), 'DATABASE STATUS'),
       dbBody
     ),
+    backupPanel,
     el('div', { class: 'set-grid' },
       el('div', { class: 'panel' },
         el('div', { class: 'panel-title mb14' }, el('span', { class: 'pt-ic' }, '⚙'), 'GENERAL'),

@@ -464,12 +464,92 @@ function getAgentStats() {
   return { totals, byAgent };
 }
 
+/* ─── Memories v2 (Phase 5) ─────────────────────────────────────── */
+
+function insertMemory({ type = 'fact', content, source = 'auto', importance = 5, expiresAt = null }) {
+  const info = db.prepare(`INSERT INTO memories (type, content, source, importance, expires_at)
+                           VALUES (?, ?, ?, ?, ?)`)
+    .run(String(type), String(content).slice(0, 2000), String(source), Math.max(1, Math.min(10, +importance || 5)), expiresAt);
+  return info.lastInsertRowid;
+}
+
+function listMemories({ type = null, limit = 500 } = {}) {
+  const rows = type
+    ? db.prepare('SELECT * FROM memories WHERE type = ? ORDER BY importance DESC, id DESC LIMIT ?').all(type, limit)
+    : db.prepare('SELECT * FROM memories ORDER BY importance DESC, id DESC LIMIT ?').all(limit);
+  return rows;
+}
+
+function updateMemoryV2(id, { type, content, importance, expiresAt } = {}) {
+  db.prepare(`UPDATE memories SET
+      type       = COALESCE(?, type),
+      content    = COALESCE(?, content),
+      importance = COALESCE(?, importance),
+      expires_at = ?,
+      updated_at = datetime('now')
+    WHERE id = ?`).run(type ?? null, content ?? null, importance ?? null, expiresAt === undefined ? null : expiresAt, id);
+  return true;
+}
+
+function deleteMemoryV2(id) {
+  db.prepare('DELETE FROM memories WHERE id = ?').run(id);
+  return true;
+}
+
+function deleteAllMemoriesV2() {
+  const info = db.prepare('DELETE FROM memories').run();
+  return info.changes;
+}
+
+function touchMemory(id) {
+  db.prepare("UPDATE memories SET use_count = use_count + 1, last_used_at = datetime('now') WHERE id = ?").run(id);
+  return true;
+}
+
+function getMemoryStatsV2() {
+  const total = db.prepare('SELECT COUNT(*) AS n FROM memories').get().n;
+  const byType = db.prepare('SELECT type, COUNT(*) AS n FROM memories GROUP BY type').all();
+  let bytes = 0;
+  try { bytes = db.prepare('SELECT COALESCE(SUM(LENGTH(content)),0) AS b FROM memories').get().b || 0; }
+  catch (e) { /* ignore */ }
+  const types = { fact: 0, preference: 0, event: 0, relationship: 0 };
+  for (const r of byType) if (types[r.type] !== undefined) types[r.type] = r.n;
+  return { total, byType: types, contentBytes: bytes };
+}
+
+/** Non-expired memories, ranked for context injection (importance + recency of use). */
+function getActiveMemories(limit = 40) {
+  return db.prepare(`SELECT * FROM memories
+    WHERE expires_at IS NULL OR expires_at = '' OR expires_at > datetime('now')
+    ORDER BY importance DESC,
+              (last_used_at IS NULL), last_used_at DESC,
+              id DESC
+    LIMIT ?`).all(limit);
+}
+
+/* ─── Backup history (Phase 5) ──────────────────────────────────── */
+
+function insertBackupHistory({ filePath, fileSize = null, type = 'manual', status = 'success', appVersion = null }) {
+  const info = db.prepare(`INSERT INTO backup_history (file_path, file_size, type, status, app_version)
+                           VALUES (?, ?, ?, ?, ?)`).run(filePath, fileSize, type, status, appVersion);
+  return info.lastInsertRowid;
+}
+
+function listBackupHistory({ limit = 30 } = {}) {
+  return db.prepare('SELECT * FROM backup_history ORDER BY id DESC LIMIT ?').all(limit);
+}
+
+function updateBackupHistory(id, { status } = {}) {
+  db.prepare('UPDATE backup_history SET status = COALESCE(?, status) WHERE id = ?').run(status ?? null, id);
+  return true;
+}
+
 /* ─── status for Settings UI ────────────────────────────────────── */
 
 function status() {
   if (!db) return { connected: false };
   const tables = {};
-  for (const t of ['api_keys', 'voice_keys', 'settings', 'memory', 'activity_log', 'workflows', 'notifications', 'agent_runs', 'agent_steps', 'schema_version']) {
+  for (const t of ['api_keys', 'voice_keys', 'settings', 'memory', 'memories', 'backup_history', 'activity_log', 'workflows', 'notifications', 'agent_runs', 'agent_steps', 'schema_version']) {
     try {
       tables[t] = db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get().n;
     } catch (e) {
@@ -486,10 +566,24 @@ function status() {
   };
 }
 
-function close() { if (db) { db.close(); db = null; } }
+function close() {
+  if (!db) return;
+  const handle = db;
+  db = null; // NULL FIRST — init() must reopen even if close() throws (WAL checkpoint etc.)
+  try { handle.close(); } catch (e) {
+    try { handle.pragma('wal_checkpoint(TRUNCATE)'); } catch (e2) { /* best effort */ }
+    console.warn('[jarvis] db.close() threw (continued null-safe):', e.message);
+  }
+}
+
+/** WAL checkpoint passthrough — backup/restore ke liye zaroori (live data WAL mein hota hai). */
+function pragmaWAL(cmd) {
+  if (!db) throw new Error('DB not open');
+  return db.pragma(cmd);
+}
 
 module.exports = {
-  init, close, status,
+  init, close, status, pragmaWAL,
   logActivity, getActivity,
   getSetting, setSetting, getAllSettings,
   addMemory, getMemory, updateMemory, deleteMemory,
@@ -497,5 +591,8 @@ module.exports = {
   insertVoiceKey, listVoiceKeys, getDecryptedVoiceKey, getActiveVoiceKeys, updateVoiceKey, deleteVoiceKey, reorderVoiceKeys,
   insert, list, update, remove,
   insertAgentRun, updateAgentRun, insertAgentStep, updateAgentStep,
-  getAgentRun, listAgentRuns, getAgentSteps, getAgentStats
+  getAgentRun, listAgentRuns, getAgentSteps, getAgentStats,
+  insertMemory, listMemories, updateMemoryV2, deleteMemoryV2, deleteAllMemoriesV2,
+  touchMemory, getMemoryStatsV2, getActiveMemories,
+  insertBackupHistory, listBackupHistory, updateBackupHistory
 };

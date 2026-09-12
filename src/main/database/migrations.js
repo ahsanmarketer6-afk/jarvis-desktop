@@ -157,6 +157,50 @@ const MIGRATIONS = [
         CREATE INDEX IF NOT EXISTS idx_agent_steps_run ON agent_steps(run_id);
       `);
     }
+  },
+  {
+    version: 5,
+    name: 'memory-v2-and-backup-history',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS memories (
+          id          INTEGER PRIMARY KEY AUTOINCREMENT,
+          type        TEXT NOT NULL DEFAULT 'fact' CHECK (type IN ('fact','preference','event','relationship')),
+          content     TEXT NOT NULL,
+          source      TEXT NOT NULL DEFAULT 'auto' CHECK (source IN ('explicit','auto','manual')),
+          importance  INTEGER NOT NULL DEFAULT 5,
+          use_count   INTEGER NOT NULL DEFAULT 0,
+          last_used_at TEXT,
+          expires_at  TEXT,
+          created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_memories_type  ON memories(type);
+        CREATE INDEX IF NOT EXISTS idx_memories_imp   ON memories(importance);
+
+        CREATE TABLE IF NOT EXISTS backup_history (
+          id          INTEGER PRIMARY KEY AUTOINCREMENT,
+          file_path   TEXT NOT NULL,
+          file_size   INTEGER,
+          type        TEXT NOT NULL DEFAULT 'manual' CHECK (type IN ('manual','auto','pre-restore')),
+          status      TEXT NOT NULL DEFAULT 'success' CHECK (status IN ('success','failed','restored')),
+          app_version TEXT,
+          created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `);
+      // Legacy phase-2 'memory' rows → memories (one-time best-effort import)
+      try {
+        const legacy = db.prepare('SELECT id, content, source_agent, created_at FROM memory').all();
+        for (const r of legacy) {
+          const exists = db.prepare('SELECT id FROM memories WHERE content = ?').get(r.content);
+          if (!exists && r.content && String(r.content).trim()) {
+            db.prepare(`INSERT INTO memories (type, content, source, importance, created_at, updated_at)
+                        VALUES ('fact', ?, 'manual', 5, COALESCE(?, datetime('now')), datetime('now'))`)
+              .run(String(r.content).slice(0, 2000), r.created_at || null);
+          }
+        }
+      } catch (e) { /* legacy table may be empty/missing — non-fatal */ }
+    }
   }
 ];
 

@@ -11,6 +11,7 @@ const { registry } = require('./base-agent');
 
 // Built-in agents self-register on first require (idempotent via registry dedupe)
 require('./agents');
+require('../memory/agents'); // Phase 5: memory + backup agents (idempotent registration)
 
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -63,6 +64,32 @@ class Orchestrator {
 
       // Route: system → SystemInfoAgent direct; research/task → plan; chat → fast path
       let finalResult = '';
+
+      // Phase 5: memory/backup fast-path — zero LLM cost, instant routing
+      if (!forceClassification) {
+        const t = String(request || '').toLowerCase();
+        if (/^(?:jarvis[,:]?\s*)?(?:yaad rakho|remember|yaad rakhna|note kar)\b/.test(t) || /^mera naam /.test(t)) {
+          finalResult = await this._executeSteps(dbRunId, runId, request, state, emit,
+            [{ index: 1, agent: 'memory', description: request }], timeoutMs);
+          db.updateAgentRun(dbRunId, { status: 'succeeded', result: finalResult, classification: 'memory' });
+          emit({ type: 'done', result: finalResult, durationMs: Date.now() - started });
+          return { runId, dbRunId, result: finalResult, classification: 'memory' };
+        }
+        if (/\b(?:yaad hai|kya pata|kya yaad|what do you know|mere bare|meri memory)\b/.test(t)) {
+          finalResult = await this._executeSteps(dbRunId, runId, request, state, emit,
+            [{ index: 1, agent: 'memory-search', description: request }], timeoutMs);
+          db.updateAgentRun(dbRunId, { status: 'succeeded', result: finalResult, classification: 'memory' });
+          emit({ type: 'done', result: finalResult, durationMs: Date.now() - started });
+          return { runId, dbRunId, result: finalResult, classification: 'memory-search' };
+        }
+        if (/\b(?:backup|bakup|restore)\b/.test(t)) {
+          finalResult = await this._executeSteps(dbRunId, runId, request, state, emit,
+            [{ index: 1, agent: 'backup', description: request }], timeoutMs);
+          db.updateAgentRun(dbRunId, { status: 'succeeded', result: finalResult, classification: 'backup' });
+          emit({ type: 'done', result: finalResult, durationMs: Date.now() - started });
+          return { runId, dbRunId, result: finalResult, classification: 'backup' };
+        }
+      }
 
       if (classification === 'system') {
         finalResult = await this._executeSteps(dbRunId, runId, request, state, emit,
