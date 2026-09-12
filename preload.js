@@ -105,6 +105,7 @@ contextBridge.exposeInMainWorld('jarvis', {
     getActiveConfig: () => ipcRenderer.invoke('voice:getActiveConfig'),
     synthesize: (text, options) => ipcRenderer.invoke('voice:synthesize', text, options),
     transcribe: (audioData, options) => ipcRenderer.invoke('voice:transcribe', audioData, options),
+    reuseGeminiKeyForStt: () => ipcRenderer.invoke('voice:reuseGeminiKeyForStt'),
     live: {
       start: (options) => ipcRenderer.invoke('voice:live:start', options),
       sendAudio: (pcmChunk) => ipcRenderer.invoke('voice:live:sendAudio', pcmChunk),

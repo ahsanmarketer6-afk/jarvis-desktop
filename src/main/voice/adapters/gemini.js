@@ -2,6 +2,14 @@
 
 const BaseVoiceAdapter = require('./base');
 
+let NodeWebSocket = null;
+try {
+  const wsPkg = require('ws');
+  NodeWebSocket = wsPkg.WebSocket || wsPkg;
+} catch (e) {
+  console.warn('[Gemini Voice Adapter] ws package not pre-loaded:', e.message);
+}
+
 class GeminiVoiceAdapter extends BaseVoiceAdapter {
   constructor() {
     super('gemini', 'Google AI (Gemini)', { tts: true, stt: true, live: true });
@@ -297,8 +305,18 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
         }
       }, 12000);
 
+      if (!NodeWebSocket) {
+        try {
+          const wsPkg = require('ws');
+          NodeWebSocket = wsPkg.WebSocket || wsPkg;
+        } catch (e) {
+          clearTimeout(timeoutId);
+          return finishError('Node WebSocket library (ws) is not available. Please ensure ws package is installed.');
+        }
+      }
+
       try {
-        ws = new WebSocket(wsUrl);
+        ws = new NodeWebSocket(wsUrl);
       } catch (err) {
         clearTimeout(timeoutId);
         return finishError(`WebSocket creation error: ${err.message}`);

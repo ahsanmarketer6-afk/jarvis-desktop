@@ -3,6 +3,14 @@
 const EventEmitter = require('events');
 const db = require('../database');
 
+let NodeWebSocket = null;
+try {
+  const wsPkg = require('ws');
+  NodeWebSocket = wsPkg.WebSocket || wsPkg;
+} catch (e) {
+  console.warn('[Gemini Live Session] ws package not pre-loaded:', e.message);
+}
+
 /**
  * GeminiLiveSessionManager
  * Manages WebSocket sessions with Gemini Live API (v1alpha BidiGenerateContent).
@@ -73,8 +81,17 @@ class GeminiLiveSessionManager extends EventEmitter {
     return new Promise((resolve, reject) => {
       let resolved = false;
 
+      if (!NodeWebSocket) {
+        try {
+          const wsPkg = require('ws');
+          NodeWebSocket = wsPkg.WebSocket || wsPkg;
+        } catch (e) {
+          return reject(new Error('Node WebSocket library (ws) is not available. Please ensure ws package is installed.'));
+        }
+      }
+
       try {
-        this.ws = new WebSocket(wsUrl);
+        this.ws = new NodeWebSocket(wsUrl);
       } catch (err) {
         console.error('[Gemini Live API] WebSocket initialization failed:', err);
         return reject(new Error(`Failed to create Live WebSocket: ${err.message}`));

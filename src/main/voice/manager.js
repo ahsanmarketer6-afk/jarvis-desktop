@@ -232,39 +232,145 @@ class VoiceManager {
   }
 
   async getActiveConfig() {
-    const keys = db.getActiveVoiceKeys();
-    const ttsKey = keys.find(k => {
+    const voiceKeys = db.getActiveVoiceKeys();
+    const brainKeys = db.getActiveApiKeys();
+
+    const ttsKey = voiceKeys.find(k => {
       const adapter = getVoiceAdapter(k.provider);
       return adapter && adapter.capabilities.tts;
     });
-    const sttKey = keys.find(k => {
+
+    let sttKey = voiceKeys.find(k => {
       const adapter = getVoiceAdapter(k.provider);
       return adapter && adapter.capabilities.stt;
     });
-    const liveKey = keys.find(k => k.provider === 'gemini') || db.getActiveApiKeys().find(k => k.provider === 'gemini');
+
+    let isReused = false;
+    let reusedSource = null;
+
+    // Check if Gemini key is available in Voice or Brain
+    const geminiVoice = voiceKeys.find(k => k.provider === 'gemini');
+    const geminiBrain = brainKeys.find(k => k.provider === 'gemini');
+    const groqBrain = brainKeys.find(k => k.provider === 'groq');
+    const openaiBrain = brainKeys.find(k => k.provider === 'openai');
+
+    const existingGeminiCandidate = geminiVoice || geminiBrain ? {
+      source: geminiVoice ? 'voice' : 'brain',
+      keyName: (geminiVoice || geminiBrain).key_name,
+      maskedKey: (geminiVoice || geminiBrain).raw_key ? ((geminiVoice || geminiBrain).raw_key.slice(0, 4) + '••••••••' + (geminiVoice || geminiBrain).raw_key.slice(-3)) : '••••••••',
+      rawKey: (geminiVoice || geminiBrain).raw_key,
+      model: (geminiVoice || geminiBrain).selected_model || 'gemini-2.0-flash'
+    } : null;
+
+    if (!sttKey) {
+      if (geminiVoice && geminiVoice.raw_key) {
+        sttKey = {
+          id: geminiVoice.id,
+          provider: 'gemini',
+          keyName: `${geminiVoice.key_name} (Auto-reused)`,
+          voice: geminiVoice.selected_voice,
+          model: geminiVoice.selected_model || 'gemini-2.0-flash',
+          customEndpoint: geminiVoice.custom_endpoint
+        };
+        isReused = true;
+        reusedSource = 'Voice Gemini Key';
+      } else if (geminiBrain && geminiBrain.raw_key) {
+        sttKey = {
+          id: geminiBrain.id,
+          provider: 'gemini',
+          keyName: `${geminiBrain.key_name} (Brain Gemini)`,
+          model: 'gemini-2.0-flash',
+          customEndpoint: null
+        };
+        isReused = true;
+        reusedSource = 'Brain Gemini Key';
+      } else if (groqBrain && groqBrain.raw_key) {
+        sttKey = {
+          id: groqBrain.id,
+          provider: 'groq',
+          keyName: `${groqBrain.key_name} (Brain Groq)`,
+          model: 'whisper-large-v3',
+          customEndpoint: null
+        };
+        isReused = true;
+        reusedSource = 'Brain Groq Key';
+      } else if (openaiBrain && openaiBrain.raw_key) {
+        sttKey = {
+          id: openaiBrain.id,
+          provider: 'openai',
+          keyName: `${openaiBrain.key_name} (Brain OpenAI)`,
+          model: 'whisper-1',
+          customEndpoint: null
+        };
+        isReused = true;
+        reusedSource = 'Brain OpenAI Key';
+      }
+    }
+
+    const liveKey = geminiVoice || geminiBrain;
 
     return {
       tts: ttsKey ? {
         id: ttsKey.id,
         provider: ttsKey.provider,
         keyName: ttsKey.key_name,
-        voice: ttsKey.selected_voice,
-        model: ttsKey.selected_model,
+        voice: ttsKey.selected_voice || 'Puck',
+        model: ttsKey.selected_model || 'gemini-2.0-flash',
         customEndpoint: ttsKey.custom_endpoint
       } : null,
       stt: sttKey ? {
         id: sttKey.id,
         provider: sttKey.provider,
-        keyName: sttKey.key_name,
-        model: ttsKey?.selected_model || sttKey.selected_model,
-        customEndpoint: sttKey.custom_endpoint
+        keyName: sttKey.keyName || sttKey.key_name,
+        model: sttKey.model || sttKey.selected_model || 'gemini-2.0-flash',
+        customEndpoint: sttKey.custom_endpoint || null,
+        isReused,
+        reusedSource
       } : null,
       live: liveKey ? {
         available: true,
         keyName: liveKey.key_name,
         hasGeminiKey: true
-      } : { available: false, hasGeminiKey: false }
+      } : { available: false, hasGeminiKey: false },
+      existingGeminiCandidate
     };
+  }
+
+  /**
+   * One-click action to save/register existing Gemini key for STT in voice vault.
+   */
+  async reuseGeminiKeyForStt() {
+    const existing = await this.getExistingGeminiKey();
+    if (!existing.available && !db.getActiveVoiceKeys().find(k => k.provider === 'gemini')) {
+      throw new Error('No existing Gemini key found to reuse.');
+    }
+
+    let rawKey = existing.rawKey;
+    let keyName = (existing.keyName || 'Gemini') + ' (STT + TTS)';
+
+    if (!rawKey) {
+      const vKey = db.getActiveVoiceKeys().find(k => k.provider === 'gemini');
+      if (vKey) {
+        rawKey = vKey.raw_key;
+        keyName = vKey.key_name + ' (STT + TTS)';
+      }
+    }
+
+    if (!rawKey) {
+      throw new Error('Could not find decrypted Gemini key.');
+    }
+
+    const saveRes = await this.saveKey({
+      provider: 'gemini',
+      keyName,
+      rawKey,
+      selectedVoice: 'Puck',
+      selectedModel: 'gemini-2.0-flash',
+      priority: 1
+    });
+
+    this.invalidateActiveConfig();
+    return { success: true, id: saveRes.id, message: 'Gemini key successfully linked for STT and TTS!' };
   }
 
   /**
@@ -391,13 +497,39 @@ class VoiceManager {
     }
 
     const activeKeys = db.getActiveVoiceKeys();
-    const sttKeys = activeKeys.filter(k => {
+    let sttKeys = activeKeys.filter(k => {
       const adapter = getVoiceAdapter(k.provider);
       return adapter && adapter.capabilities.stt;
     });
 
+    // KEY REUSE: If user added a key that only has TTS (e.g. ElevenLabs), or no active STT key exists,
+    // check if there is an active Gemini key in Voice keys or Brain keys, or Groq/OpenAI keys
     if (!sttKeys.length) {
-      throw new Error('No active Speech-to-Text key found. Please add and test a Groq, Google AI, OpenAI, or Custom key in the Voice API tab.');
+      const geminiVoice = activeKeys.find(k => k.provider === 'gemini');
+      if (geminiVoice && geminiVoice.raw_key) {
+        sttKeys = [geminiVoice];
+        console.log(`[VoiceManager] STT: Automatically reusing active Gemini voice key "${geminiVoice.key_name}" for STT transcription.`);
+      } else {
+        const brainKeys = db.getActiveApiKeys();
+        const candidate = brainKeys.find(k => k.provider === 'gemini') ||
+                          brainKeys.find(k => k.provider === 'groq') ||
+                          brainKeys.find(k => k.provider === 'openai');
+        if (candidate && candidate.raw_key) {
+          sttKeys = [{
+            id: candidate.id,
+            provider: candidate.provider,
+            key_name: candidate.key_name,
+            raw_key: candidate.raw_key,
+            selected_model: candidate.provider === 'gemini' ? 'gemini-2.0-flash' : (candidate.provider === 'groq' ? 'whisper-large-v3' : 'whisper-1'),
+            custom_endpoint: null
+          }];
+          console.log(`[VoiceManager] STT: Automatically reusing active ${candidate.provider} brain key "${candidate.key_name}" for STT transcription.`);
+        }
+      }
+    }
+
+    if (!sttKeys.length) {
+      throw new Error('No active Speech-to-Text key found. Please add and test a Google AI (Gemini), Groq, or OpenAI key in the Voice API or Brain tab.');
     }
 
     let lastError = null;

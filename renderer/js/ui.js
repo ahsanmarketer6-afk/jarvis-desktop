@@ -1770,6 +1770,109 @@ async function renderVoice(container) {
 
   container.innerHTML = '';
 
+  // Dual-Engine Live Status Dashboard (TTS + STT)
+  const dualEngineStatusCard = el('div', {
+    style: 'background:rgba(10,14,10,0.85);border:1px solid var(--line2);border-radius:10px;padding:14px 16px;margin-bottom:14px'
+  });
+
+  async function updateDualEngineStatus() {
+    dualEngineStatusCard.innerHTML = '';
+    let activeConfig = null;
+    try {
+      if (window.jarvis?.voice?.getActiveConfig) {
+        activeConfig = await window.jarvis.voice.getActiveConfig();
+      }
+    } catch (e) {
+      console.warn('getActiveConfig error:', e);
+    }
+
+    const tts = activeConfig?.tts;
+    const stt = activeConfig?.stt;
+    const existingGemini = activeConfig?.existingGeminiCandidate;
+
+    const ttsMeta = tts ? getVoiceProviderMeta(tts.provider) : null;
+    const sttMeta = stt ? getVoiceProviderMeta(stt.provider) : null;
+
+    const ttsBlock = el('div', {
+      style: 'flex:1;min-width:260px;background:#0d110d;border:1px solid ' + (tts ? 'rgba(46,230,168,0.3)' : 'rgba(255,85,85,0.3)') + ';border-radius:8px;padding:12px'
+    },
+      el('div', { style: 'display:flex;align-items:center;justify-content:space-between;margin-bottom:6px' },
+        el('div', { style: 'display:flex;align-items:center;gap:6px' },
+          el('span', { style: 'font-size:14px' }, '🔊'),
+          el('span', { style: 'font-weight:700;font-size:11.5px;color:var(--text)' }, 'TTS (Bolna / Speaking)')
+        ),
+        tts
+          ? el('span', { class: 'badge green', style: 'font-size:9px' }, '✅ ACTIVE')
+          : el('span', { class: 'badge red', style: 'font-size:9px' }, '❌ MISSING')
+      ),
+      tts
+        ? el('div', { style: 'font-size:10px;color:var(--muted);line-height:1.4' },
+            el('div', { style: 'color:#fff;font-weight:600' }, (ttsMeta?.glyph || '♫') + ' ' + (tts.keyName || ttsMeta?.name || 'Voice Engine')),
+            el('div', {}, 'Voice: <b style="color:var(--mint)">' + (tts.voice || 'Default') + '</b> • Model: <span style="font-family:var(--font-mono)">' + (tts.model || 'auto') + '</span>')
+          )
+        : el('div', { style: 'font-size:9.5px;color:#ff8888;line-height:1.4' },
+            'Jarvis bolne ke liye active TTS voice key chahiye. Google AI, ElevenLabs, ya OpenAI key add karein.'
+          )
+    );
+
+    const sttBlock = el('div', {
+      style: 'flex:1;min-width:260px;background:#0d110d;border:1px solid ' + (stt ? 'rgba(46,230,168,0.3)' : 'rgba(255,85,85,0.3)') + ';border-radius:8px;padding:12px'
+    },
+      el('div', { style: 'display:flex;align-items:center;justify-content:space-between;margin-bottom:6px' },
+        el('div', { style: 'display:flex;align-items:center;gap:6px' },
+          el('span', { style: 'font-size:14px' }, '👂'),
+          el('span', { style: 'font-weight:700;font-size:11.5px;color:var(--text)' }, 'STT (Sunna / Listening)')
+        ),
+        stt
+          ? el('span', { class: 'badge green', style: 'font-size:9px' }, stt.isReused ? '✅ ACTIVE (REUSED)' : '✅ ACTIVE')
+          : el('span', { class: 'badge red', style: 'font-size:9px' }, '❌ MISSING')
+      ),
+      stt
+        ? el('div', { style: 'font-size:10px;color:var(--muted);line-height:1.4' },
+            el('div', { style: 'color:#fff;font-weight:600' }, (sttMeta?.glyph || '🎙') + ' ' + (stt.keyName || sttMeta?.name || 'Speech-to-Text')),
+            el('div', {}, 'Model: <b style="color:var(--mint);font-family:var(--font-mono)">' + (stt.model || 'gemini-2.0-flash') + '</b>' + (stt.isReused ? ' <span style="color:#a8d1ff;font-size:9px">(Reused from ' + (stt.reusedSource || 'Gemini') + ')</span>' : ''))
+          )
+        : el('div', { style: 'font-size:9.5px;color:#ff8888;line-height:1.4' },
+            'Jarvis sunne ke liye active STT key chahiye.'
+          )
+    );
+
+    const grid = el('div', { style: 'display:flex;gap:12px;flex-wrap:wrap' }, ttsBlock, sttBlock);
+    dualEngineStatusCard.appendChild(grid);
+
+    // If STT key is not dedicated, but an existing Gemini key is available:
+    if (existingGemini && (!stt || stt.isReused)) {
+      const reuseOfferBar = el('div', {
+        style: 'margin-top:10px;background:rgba(77,166,255,0.09);border:1px solid rgba(77,166,255,0.35);border-radius:8px;padding:10px 14px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap'
+      },
+        el('div', { style: 'font-size:10.5px;color:#cce4ff;line-height:1.4' },
+          el('span', { style: 'font-weight:700;color:#fff' }, '💡 Jarvis sunne ke liye STT key chahiye — '),
+          `apni Gemini key (<b>${existingGemini.keyName}</b>) already TTS ke liye active hai, use karte hain?`
+        ),
+        el('button', {
+          class: 'btn primary',
+          style: 'background:#1a426f;border-color:#4da6ff;color:#ffffff;font-size:10px;padding:5px 12px',
+          onclick: async () => {
+            try {
+              if (window.jarvis?.voice?.reuseGeminiKeyForStt) {
+                await window.jarvis.voice.reuseGeminiKeyForStt();
+                currentKeys = await window.jarvis.voice.getKeys();
+                updateVoiceKeysUI();
+                updateVoiceChainUI();
+                await updateDualEngineStatus();
+                toast('✓ Gemini key linked for STT & TTS successfully!');
+              }
+            } catch (err) {
+              toast('Link failed: ' + err.message, true);
+            }
+          }
+        }, '✨ Use existing Gemini key for STT')
+      );
+      dualEngineStatusCard.appendChild(reuseOfferBar);
+    }
+  }
+  updateDualEngineStatus();
+
   // 1. Fallback Chain Visualization
   const chainRow = el('div', { class: 'chain-row' });
   function updateVoiceChainUI() {
@@ -1813,6 +1916,7 @@ async function renderVoice(container) {
             currentKeys = await window.jarvis.voice.getKeys();
             updateVoiceKeysUI();
             updateVoiceChainUI();
+            await updateDualEngineStatus();
             toast('Active voice provider switched to ' + (k.key_name || k.provider));
           } catch (err) {
             toast('Failed to set active voice key: ' + err.message, true);
@@ -1842,6 +1946,7 @@ async function renderVoice(container) {
               currentKeys = await window.jarvis.voice.deleteKey(k.id);
               updateVoiceKeysUI();
               updateVoiceChainUI();
+              await updateDualEngineStatus();
               toast('Voice key removed from vault');
             } catch (err) {
               toast('Failed to delete key: ' + err.message, true);
@@ -1874,6 +1979,7 @@ async function renderVoice(container) {
             currentKeys = await window.jarvis.voice.reorderKeys(newIds);
             updateVoiceKeysUI();
             updateVoiceChainUI();
+            await updateDualEngineStatus();
             toast('Voice priority chain updated — #' + (newIdx + 1) + ' is now ' + (moved.key_name || moved.provider));
           } catch (err) {
             toast('Reorder failed: ' + err.message, true);
@@ -2269,6 +2375,7 @@ async function renderVoice(container) {
       currentKeys = await window.jarvis.voice.getKeys();
       updateVoiceKeysUI();
       updateVoiceChainUI();
+      await updateDualEngineStatus();
     } catch (err) {
       setStatus('✕ Save failed: ' + err.message, 'err');
       toast('Save failed: ' + err.message, true);
@@ -2476,6 +2583,7 @@ async function renderVoice(container) {
         el('div', { class: 'panel-title' }, el('span', { class: 'pt-ic' }, '♪'), 'VOICE API — CLOUD STT & TTS ENGINES'),
         el('span', { class: 'badge green' }, '● PRIORITY CHAIN: ACTIVE')
       ),
+      dualEngineStatusCard,
       el('div', { class: 'form-row' },
         el('div', { class: 'form-label' }, '◈ SPEECH FALLBACK CHAIN (drag ⋮⋮ to reorder fallback sequence)'),
         chainRow

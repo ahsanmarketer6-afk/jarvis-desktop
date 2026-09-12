@@ -146,6 +146,7 @@ ipcMain.handle('voice:setActiveKey', (_e, id) => voiceManager.setActiveKey(id));
 ipcMain.handle('voice:getActiveConfig', () => voiceManager.getActiveConfig());
 ipcMain.handle('voice:synthesize', (_e, text, options) => voiceManager.synthesize(text, options));
 ipcMain.handle('voice:transcribe', (_e, audioData, options) => voiceManager.transcribe(audioData, options));
+ipcMain.handle('voice:reuseGeminiKeyForStt', () => voiceManager.reuseGeminiKeyForStt());
 
 // Live API BidiGenerateContent IPC Handlers
 ipcMain.handle('voice:live:start', (e, opts) => voiceManager.startLiveSession({ ...(opts || {}), windowSender: e.sender }));

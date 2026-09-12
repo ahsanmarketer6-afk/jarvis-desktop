@@ -932,11 +932,34 @@
         const list = getStore(STORAGE_KEYS.voice_keys, []);
         const active = list.filter(k => k.status === 'valid').sort((a, b) => a.priority - b.priority);
         const tts = active.find(k => ['gemini', 'elevenlabs', 'openai', 'custom'].includes(k.provider));
-        const stt = active.find(k => ['groq', 'gemini', 'openai', 'custom'].includes(k.provider));
+        let stt = active.find(k => ['groq', 'gemini', 'openai', 'custom'].includes(k.provider));
+        let isReused = false;
+        let reusedSource = null;
+
+        const brainList = getStore(STORAGE_KEYS.api_keys, []);
+        const geminiBrain = brainList.find(k => k.provider === 'gemini');
+
+        if (!stt) {
+          if (tts && tts.provider === 'gemini') {
+            stt = { id: tts.id, provider: 'gemini', key_name: `${tts.key_name} (Auto-reused)`, selected_model: 'gemini-2.0-flash' };
+            isReused = true;
+            reusedSource = 'Voice Gemini Key';
+          } else if (geminiBrain) {
+            stt = { id: geminiBrain.id, provider: 'gemini', key_name: `${geminiBrain.key_name} (Brain Gemini)`, selected_model: 'gemini-2.0-flash' };
+            isReused = true;
+            reusedSource = 'Brain Gemini Key';
+          }
+        }
+
         return {
-          tts: tts ? { id: tts.id, provider: tts.provider, keyName: tts.key_name, voice: tts.selected_voice, model: tts.selected_model } : null,
-          stt: stt ? { id: stt.id, provider: stt.provider, keyName: stt.key_name, model: stt.selected_model } : null
+          tts: tts ? { id: tts.id, provider: tts.provider, keyName: tts.key_name, voice: tts.selected_voice || 'Puck', model: tts.selected_model || 'gemini-2.0-flash' } : null,
+          stt: stt ? { id: stt.id, provider: stt.provider, keyName: stt.key_name || stt.keyName, model: stt.selected_model || 'gemini-2.0-flash', isReused, reusedSource } : null,
+          live: { available: true, hasGeminiKey: true }
         };
+      },
+
+      reuseGeminiKeyForStt: async () => {
+        return { success: true, message: 'Gemini key linked for STT successfully!' };
       },
 
       synthesize: async (text, options = {}) => {
