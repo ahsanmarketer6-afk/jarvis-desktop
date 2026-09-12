@@ -163,6 +163,29 @@ class VoiceManager {
       throw new Error(`Unknown voice provider: "${provider}"`);
     }
 
+    // Consistency with fetchModels/fetchVoices/getModelQuota: saved-key UI paths
+    // pass no raw key (masked for security) — resolve the REAL key from the vault.
+    if (!key || !String(key).trim()) {
+      const vk = db.getActiveVoiceKeys().find(k => k.provider === provider) ||
+                 db.getActiveApiKeys().find(k => k.provider === provider);
+      if (vk && vk.raw_key) key = vk.raw_key;
+    }
+
+    // LIVE SESSION REUSE: agar realtime Live conversation chal rahi hai to test
+    // USI session par karo — Google per key sirf EK bidi session allow karta hai;
+    // doosra probe socket 1008/1011 (policy violation) se turant kaat diya jata hai
+    // (yehi "Code 1011 — model rejected" wala jhoota error tha).
+    if (provider === 'gemini') {
+      const st = this.liveSession.getStatus();
+      const sessionModel = st && st.config ? String(st.config.model).replace(/^models\//, '') : null;
+      const wantModel = model ? String(model).replace(/^models\//, '') : null;
+      if (st && st.setupComplete && sessionModel && (!wantModel || wantModel === sessionModel)) {
+        console.log('[VoiceManager] Test Voice: active Live session mila — test USI session par (no second socket).');
+        const viaSession = await this._testViaActiveLiveSession(voice || (st.config && st.config.voice) || 'Puck');
+        if (viaSession) return viaSession;
+      }
+    }
+
     const result = await adapter.testVoice(key, voice || model, 'Salam, main Jarvis hoon', {
       model,
       customEndpoint
@@ -175,6 +198,47 @@ class VoiceManager {
       result.success ? 'success' : 'failed'
     );
     return result;
+  }
+
+  /**
+   * Test through the ALREADY-OPEN Live conversation session: send a greeting turn,
+   * count arriving audio bytes, resolve on turnComplete. Audio plays live in the
+   * app (user hears it) — no separate socket, no concurrent-session rejection.
+   */
+  _testViaActiveLiveSession(voice) {
+    return new Promise((resolve) => {
+      const live = this.liveSession;
+      const t0 = Date.now();
+      let audioBytes = 0;
+
+      const onAudio = ({ data }) => {
+        audioBytes += Math.floor(String(data || '').length * 0.75);
+      };
+      live.on('live:audio', onAudio);
+
+      const finish = (result) => {
+        live.removeListener('live:audio', onAudio);
+        clearTimeout(timer);
+        resolve(result);
+      };
+
+      const timer = setTimeout(() => {
+        finish(audioBytes > 1000
+          ? { success: true, audioBase64: null, mimeType: 'audio/wav', latencyMs: Date.now() - t0, playedVia: 'active-live-session', message: 'Test audio aap ki chal rahi Live conversation par play ho gaya ✅' }
+          : { success: false, error: 'Active Live session ne test audio nahi bheji — dobara try karein.' });
+      }, 12000);
+
+      live.once('live:turnComplete', () => {
+        finish(audioBytes > 1000
+          ? { success: true, audioBase64: null, mimeType: 'audio/wav', latencyMs: Date.now() - t0, playedVia: 'active-live-session', message: 'Test audio Live session par play hua ✅' }
+          : { success: false, error: 'Live session se audio nahi aayi.' });
+      });
+
+      const send = live.sendClientText('Salam Jarvis, test voice greeting. Sirf chhota sa jawab do.');
+      if (!send || !send.success) {
+        finish({ success: false, error: (send && send.error) || 'Live session par text send fail' });
+      }
+    });
   }
 
   async saveKey({ provider, keyName, rawKey, selectedVoice = null, selectedModel = null, customEndpoint = null, priority = 100 }) {
@@ -349,6 +413,58 @@ class VoiceManager {
       } : { available: false, hasGeminiKey: false },
       existingGeminiCandidate
     };
+  }
+
+  /**
+   * One-click: link an existing Gemini key (Brain API ya voice vault) for VOICE —
+   * with a LIVE-discovered live-capable model so realtime conversation works
+   * immediately (user ka primary use-case). STT reuse helper isi par build hai.
+   */
+  async reuseGeminiKeyForVoice() {
+    const existing = await this.getExistingGeminiKey();
+    let rawKey = existing && existing.rawKey;
+    let keyName = (existing && existing.keyName ? existing.keyName : 'Gemini') + ' Voice';
+
+    if (!rawKey) {
+      const vKey = db.getActiveVoiceKeys().find(k => k.provider === 'gemini');
+      if (vKey && vKey.raw_key) {
+        rawKey = vKey.raw_key;
+        keyName = vKey.key_name + ' (relinked)';
+      }
+    }
+    if (!rawKey) {
+      throw new Error('Koi Gemini key nahi mili — Brain API ya Voice API tab mein key add karein.');
+    }
+
+    // Prefer a LIVE-capable model (realtime conversation) — live-discovered, not hardcoded
+    const liveModels = await this.fetchModels('gemini', rawKey, null, false, 'live').catch(() => []);
+    let selectedModel = (liveModels[0] && liveModels[0].id) || null;
+    if (!selectedModel) {
+      const ttsModels = await this.fetchModels('gemini', rawKey, null, false, 'tts').catch(() => []);
+      selectedModel = (ttsModels[0] && ttsModels[0].id) || null;
+    }
+
+    const saveRes = await this.saveKey({
+      provider: 'gemini',
+      keyName,
+      rawKey,
+      selectedVoice: 'Puck',
+      selectedModel,
+      priority: 1
+    });
+
+    // Transient model-fetch failure at link time must not leave the key without a
+    // model — retry once and patch the saved row (live model = realtime conversation).
+    if (!selectedModel) {
+      const retryModels = await this.fetchModels('gemini', rawKey, null, true, 'live').catch(() => []);
+      if (retryModels[0] && retryModels[0].id) {
+        selectedModel = retryModels[0].id;
+        try { db.updateVoiceKey(saveRes.id, { selected_model: selectedModel }); } catch (e) {}
+      }
+    }
+
+    this.invalidateActiveConfig();
+    return { success: true, id: saveRes.id, model: selectedModel, message: 'Gemini key voice ke liye link ho gayi (model: ' + (selectedModel || 'auto') + ')' };
   }
 
   /**

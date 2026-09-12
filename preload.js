@@ -109,6 +109,7 @@ contextBridge.exposeInMainWorld('jarvis', {
     synthesize: (text, options) => ipcRenderer.invoke('voice:synthesize', text, options),
     transcribe: (audioData, options) => ipcRenderer.invoke('voice:transcribe', audioData, options),
     reuseGeminiKeyForStt: () => ipcRenderer.invoke('voice:reuseGeminiKeyForStt'),
+    reuseGeminiKeyForVoice: () => ipcRenderer.invoke('voice:reuseGeminiKeyForVoice'),
     live: {
       start: (options) => ipcRenderer.invoke('voice:live:start', options),
       sendAudio: (pcmChunk) => ipcRenderer.invoke('voice:live:sendAudio', pcmChunk),

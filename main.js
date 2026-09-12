@@ -164,6 +164,7 @@ ipcMain.handle('voice:getUsage', () => {
   return { window: '24h', ...usage, events: rows.slice(0, 60).map(r => ({ at: r.created_at, agent: r.agent_name, action: r.action, status: r.status })) };
 });
 ipcMain.handle('voice:reuseGeminiKeyForStt', () => voiceManager.reuseGeminiKeyForStt());
+ipcMain.handle('voice:reuseGeminiKeyForVoice', () => voiceManager.reuseGeminiKeyForVoice());
 
 // Live API BidiGenerateContent IPC Handlers
 ipcMain.handle('voice:live:start', (e, opts) => voiceManager.startLiveSession({ ...(opts || {}), windowSender: e.sender }));

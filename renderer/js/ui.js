@@ -484,7 +484,13 @@ function renderChat(container) {
     try {
       const cfg = await window.jarvis.voice.getActiveConfig();
       const model = cfg && cfg.tts ? String(cfg.tts.model || '') : '';
-      liveCapableCache = /live|native-audio|realtime|bidi/i.test(model);
+      if (model) {
+        liveCapableCache = /live|native-audio|realtime|bidi/i.test(model);
+      } else {
+        // No dedicated voice key (e.g. user deleted it) but a Gemini key exists in
+        // Brain → live session manager auto-picks a live model from that key.
+        liveCapableCache = Boolean(cfg && cfg.live && cfg.live.available);
+      }
     } catch (e) {
       liveCapableCache = false;
     }
@@ -1872,38 +1878,26 @@ function getVoiceProviderMeta(id) {
 
 function makeVoiceKeyCard(k, opts = {}) {
   const meta = getVoiceProviderMeta(k.provider);
-  const used = k.quota_used || 0;
   const isActive = Boolean(k.is_active);
 
   const card = el('div', { class: 'key-card' + (isActive ? ' active' : '') },
     el('div', { class: 'key-head' },
-      opts.draggable ? el('span', { class: 'drag-handle', draggable: 'true', title: 'Drag to change priority' }, '⋮⋮') : null,
       el('span', { class: 'conn-ic', style: `width:32px;height:32px;font-size:14px;color:${meta.color}` }, meta.glyph),
       el('div', { style: 'flex:1;min-width:0' },
         el('div', { style: 'display:flex;align-items:center;gap:8px;flex-wrap:wrap' },
           el('span', { class: 'key-name' }, k.key_name || (meta.name + ' Voice')),
-          k.selected_voice ? el('span', { class: 'model-pill', title: 'TTS Voice' }, '♫ ' + k.selected_voice) : null,
-          k.selected_model ? el('span', { class: 'model-pill', title: 'Audio Model' }, '⚡ ' + k.selected_model) : null,
-          el('span', { class: 'badge gray', style: 'font-size:8px' }, meta.badge),
-          k.priority ? el('span', { class: 'badge gray', style: 'font-size:8.5px' }, '#' + k.priority) : null
+          k.selected_voice ? el('span', { class: 'model-pill', title: 'Selected Voice' }, '♫ ' + k.selected_voice) : null,
+          k.selected_model ? el('span', { class: 'model-pill', title: 'Selected Model' }, '⚡ ' + k.selected_model) : null
         ),
-        el('div', { class: 'key-val', style: 'font-size:10px;margin-top:2px' }, k.masked_key || '••••••••••••••••')
+        el('div', { class: 'key-val', style: 'font-size:10px;margin-top:2px' }, (k.masked_key || '••••••••••••••••') + ' • ' + (k.status === 'valid' ? '✓ verified' : '✕ invalid'))
       ),
       isActive
-        ? el('span', { class: 'badge green' }, '● ACTIVE NOW')
+        ? el('span', { class: 'badge green' }, '● ACTIVE')
         : el('button', { class: 'btn', style: 'padding:3px 8px;font-size:9px', onclick: opts.onActivate }, 'ACTIVATE')
     ),
-    el('div', { class: 'usage-row' },
-      el('span', {}, 'USAGE'),
-      el('span', { class: 'usage-num' }, used + ' speech units processed • ' + (k.last_used ? new Date(k.last_used).toLocaleTimeString() : 'Never used'))
-    ),
-    el('div', { style: 'display:flex;align-items:center;justify-content:space-between;margin-top:4px' },
-      el('div', { style: 'display:flex;gap:6px;align-items:center' },
-        el('span', { class: 'badge ' + (k.status === 'valid' ? 'green' : 'red'), style: 'font-size:8.5px' },
-          k.status === 'valid' ? '✓ VERIFIED' : '✕ INVALID'
-        ),
-        el('button', { class: 'btn small', style: 'font-size:8.5px;padding:2px 8px', onclick: opts.onTest }, '▶ PLAY TEST')
-      ),
+    opts.editorSlot || null,
+    el('div', { style: 'display:flex;align-items:center;justify-content:space-between;margin-top:6px' },
+      el('button', { class: 'btn small', style: 'font-size:9px;padding:3px 10px', onclick: opts.onTest }, '▶ TEST VOICE'),
       opts.removable ? el('button', { class: 'icon-btn del', title: 'Remove key from voice vault', onclick: opts.removable }, '✕') : null
     )
   );
@@ -1924,140 +1918,122 @@ async function renderVoice(container) {
 
   container.innerHTML = '';
 
-  // Dual-Engine Live Status Dashboard (TTS + STT)
-  const dualEngineStatusCard = el('div', {
-    style: 'background:rgba(10,14,10,0.85);border:1px solid var(--line2);border-radius:10px;padding:14px 16px;margin-bottom:14px'
-  });
+  /* DualEngine dashboard: REMOVED in cleanup (unused after per-key editors landed) */
 
-  async function updateDualEngineStatus() {
-    dualEngineStatusCard.innerHTML = '';
-    let activeConfig = null;
-    try {
-      if (window.jarvis?.voice?.getActiveConfig) {
-        activeConfig = await window.jarvis.voice.getActiveConfig();
-      }
-    } catch (e) {
-      console.warn('getActiveConfig error:', e);
-    }
-
-    const tts = activeConfig?.tts;
-    const stt = activeConfig?.stt;
-    const existingGemini = activeConfig?.existingGeminiCandidate;
-
-    const ttsMeta = tts ? getVoiceProviderMeta(tts.provider) : null;
-    const sttMeta = stt ? getVoiceProviderMeta(stt.provider) : null;
-
-    const ttsBlock = el('div', {
-      style: 'flex:1;min-width:260px;background:#0d110d;border:1px solid ' + (tts ? 'rgba(46,230,168,0.3)' : 'rgba(255,85,85,0.3)') + ';border-radius:8px;padding:12px'
-    },
-      el('div', { style: 'display:flex;align-items:center;justify-content:space-between;margin-bottom:6px' },
-        el('div', { style: 'display:flex;align-items:center;gap:6px' },
-          el('span', { style: 'font-size:14px' }, '🔊'),
-          el('span', { style: 'font-weight:700;font-size:11.5px;color:var(--text)' }, 'TTS (Bolna / Speaking)')
-        ),
-        tts
-          ? el('span', { class: 'badge green', style: 'font-size:9px' }, '✅ ACTIVE')
-          : el('span', { class: 'badge red', style: 'font-size:9px' }, '❌ MISSING')
-      ),
-      tts
-        ? el('div', { style: 'font-size:10px;color:var(--muted);line-height:1.4' },
-            el('div', { style: 'color:#fff;font-weight:600' }, (ttsMeta?.glyph || '♫') + ' ' + (tts.keyName || ttsMeta?.name || 'Voice Engine')),
-            el('div', { html: 'Voice: <b style="color:var(--mint)">' + (tts.voice || 'Default') + '</b> • Model: <span style="font-family:var(--font-mono)">' + (tts.model || 'auto') + '</span>' })
-          )
-        : el('div', { style: 'font-size:9.5px;color:#ff8888;line-height:1.4' },
-            'Jarvis bolne ke liye active TTS voice key chahiye. Google AI, ElevenLabs, ya OpenAI key add karein.'
-          )
-    );
-
-    const sttBlock = el('div', {
-      style: 'flex:1;min-width:260px;background:#0d110d;border:1px solid ' + (stt ? 'rgba(46,230,168,0.3)' : 'rgba(255,85,85,0.3)') + ';border-radius:8px;padding:12px'
-    },
-      el('div', { style: 'display:flex;align-items:center;justify-content:space-between;margin-bottom:6px' },
-        el('div', { style: 'display:flex;align-items:center;gap:6px' },
-          el('span', { style: 'font-size:14px' }, '👂'),
-          el('span', { style: 'font-weight:700;font-size:11.5px;color:var(--text)' }, 'STT (Sunna / Listening)')
-        ),
-        stt
-          ? el('span', { class: 'badge green', style: 'font-size:9px' }, stt.isReused ? '✅ ACTIVE (REUSED)' : '✅ ACTIVE')
-          : el('span', { class: 'badge red', style: 'font-size:9px' }, '❌ MISSING')
-      ),
-      stt
-        ? el('div', { style: 'font-size:10px;color:var(--muted);line-height:1.4' },
-            el('div', { style: 'color:#fff;font-weight:600' }, (sttMeta?.glyph || '🎙') + ' ' + (stt.keyName || sttMeta?.name || 'Speech-to-Text')),
-            el('div', { html: 'Model: <b style="color:var(--mint);font-family:var(--font-mono)">' + (stt.model || 'Auto-detected') + '</b>' + (stt.isReused ? ' <span style="color:#a8d1ff;font-size:9px">(Reused from ' + (stt.reusedSource || 'Gemini') + ')</span>' : '') })
-          )
-        : el('div', { style: 'font-size:9.5px;color:#ff8888;line-height:1.4' },
-            'Jarvis sunne ke liye active STT key chahiye.'
-          )
-    );
-
-    const grid = el('div', { style: 'display:flex;gap:12px;flex-wrap:wrap' }, ttsBlock, sttBlock);
-    dualEngineStatusCard.appendChild(grid);
-
-    // If STT key is not dedicated, but an existing Gemini key is available:
-    if (existingGemini && (!stt || stt.isReused)) {
-      const reuseOfferBar = el('div', {
-        style: 'margin-top:10px;background:rgba(77,166,255,0.09);border:1px solid rgba(77,166,255,0.35);border-radius:8px;padding:10px 14px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap'
-      },
-        el('div', { style: 'font-size:10.5px;color:#cce4ff;line-height:1.4' },
-          el('span', { style: 'font-weight:700;color:#fff' }, '💡 Jarvis sunne ke liye STT key chahiye — '),
-          `apni Gemini key (<b>${existingGemini.keyName}</b>) already TTS ke liye active hai, use karte hain?`
-        ),
-        el('button', {
-          class: 'btn primary',
-          style: 'background:#1a426f;border-color:#4da6ff;color:#ffffff;font-size:10px;padding:5px 12px',
-          onclick: async () => {
-            try {
-              if (window.jarvis?.voice?.reuseGeminiKeyForStt) {
-                await window.jarvis.voice.reuseGeminiKeyForStt();
-                currentKeys = await window.jarvis.voice.getKeys();
-                updateVoiceKeysUI();
-                updateVoiceChainUI();
-                await updateDualEngineStatus();
-                toast('✓ Gemini key linked for STT & TTS successfully!');
-              }
-            } catch (err) {
-              toast('Link failed: ' + err.message, true);
-            }
-          }
-        }, '✨ Use existing Gemini key for STT')
-      );
-      dualEngineStatusCard.appendChild(reuseOfferBar);
-    }
-  }
-  updateDualEngineStatus();
-
-  // 1. Fallback Chain Visualization
-  const chainRow = el('div', { class: 'chain-row' });
-  function updateVoiceChainUI() {
-    chainRow.innerHTML = '';
-    if (!currentKeys.length) {
-      chainRow.appendChild(el('span', { class: 'badge red' }, '⚠ NO VOICE KEYS CONFIGURED — ADD CLOUD VOICE BELOW'));
-      return;
-    }
-    currentKeys.forEach((k, i) => {
-      if (i > 0) chainRow.appendChild(el('span', { class: 'chain-arrow' }, '→'));
-      const meta = getVoiceProviderMeta(k.provider);
-      const isAct = Boolean(k.is_active);
-      const label = (k.selected_voice || k.selected_model || meta.name);
-      chainRow.appendChild(el('span', { class: 'badge ' + (isAct ? 'green' : 'gray'), title: label },
-        (i + 1) + '. ' + meta.glyph + ' ' + (k.key_name || meta.name) + (isAct ? ' (ACTIVE)' : '')
-      ));
-    });
-    chainRow.appendChild(el('span', { class: 'chain-arrow' }, '→'));
-    chainRow.appendChild(el('span', { class: 'badge red' }, '⚠ ALL FAILED = SILENT / TEXT ONLY'));
-  }
-  updateVoiceChainUI();
+  /* Fallback chain: REMOVED in cleanup (unused after per-key editors landed) */
 
   // 2. Saved Voice Keys List
   const keysWrap = el('div', { class: 'conn-grid' });
+
+  // ── Per-key VOICE/MODEL editor: dropdowns HAMESHA visible (jab tak key delete
+  // na ho) + APPLY + real quota line. Yehi woh dropdowns hain jo verify ke baad
+  // milti hain — saved key par kabhi bhi voice change kar sakte hain. ──
+  async function populateKeyVoices(k, model, sel, force) {
+    try {
+      const vRes = await window.jarvis.voice.fetchVoices('gemini', '', k.custom_endpoint, !!force, model);
+      const voices = (vRes && vRes.voices) || [];
+      sel.innerHTML = '';
+      voices.forEach(v => {
+        const gender = (v.gender || 'neutral').toLowerCase();
+        const gIcon = gender === 'male' ? '♂' : gender === 'female' ? '♀' : '⚪';
+        const langs = Array.isArray(v.langs) && v.langs.length ? v.langs.join('/') : '';
+        sel.appendChild(el('option', { value: v.id }, `♫ ${v.name || v.id} — ${gIcon} ${gender}${langs ? ' · 🌐 ' + langs : ''}`));
+      });
+      if (k.selected_voice && voices.find(v => v.id === k.selected_voice)) sel.value = k.selected_voice;
+      else if (voices.length) sel.value = voices[0].id;
+    } catch (e) {
+      sel.innerHTML = '';
+      sel.appendChild(el('option', { value: k.selected_voice || '' }, k.selected_voice || '✕ Voice fetch failed'));
+    }
+  }
+
+  async function refreshKeyQuotaLine(k, model, line, force) {
+    if (!model) { line.textContent = ''; return; }
+    try {
+      const q = await window.jarvis.voice.getModelQuota('gemini', '', model, !!force);
+      if (q.isPaidTierOnly) {
+        line.innerHTML = `<span style="color:#ffb84d">💳 "${q.model}" PAID-TIER model hai — Google AI Studio par billing add karein ya free model chunein.</span>`;
+      } else if (q.pingOk) {
+        line.innerHTML = `<span style="color:var(--mint)">◉ LIVE OK (${q.pingLatencyMs}ms)</span> — real API check`;
+      } else {
+        line.innerHTML = `<span style="color:#ff8888">✕ ${String(q.pingError || 'check failed').slice(0, 110)}</span>`;
+      }
+    } catch (e) {
+      line.innerHTML = `<span style="color:#ff8888">✕ ${String(e.message).slice(0, 110)}</span>`;
+    }
+  }
+
+  async function buildKeyEditor(k, card) {
+    const modelSel = el('select', { class: 'select', style: 'flex:1;min-width:200px;font-size:10px' }, el('option', { value: '' }, '◌ Loading models…'));
+    const voiceSel = el('select', { class: 'select', style: 'flex:1;min-width:200px;font-size:10px' }, el('option', { value: '' }, '◌ Loading voices…'));
+    const applyBtn = el('button', { class: 'btn primary', style: 'font-size:9.5px;padding:4px 12px;background:var(--mint);color:#000;border-color:var(--mint)' }, '✓ APPLY');
+    const quotaLine = el('div', { style: 'font-size:9.5px;color:var(--muted);margin-top:6px;line-height:1.5' }, '');
+    const editor = el('div', { style: 'display:flex;flex-direction:column;gap:6px;margin-top:8px;padding-top:8px;border-top:1px dashed var(--line)' },
+      el('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;align-items:center' }, modelSel, voiceSel, applyBtn),
+      quotaLine
+    );
+    card.appendChild(editor);
+
+    applyBtn.onclick = async () => {
+      if (!modelSel.value && !voiceSel.value) { toast('Pehle model/voice select karein', true); return; }
+      applyBtn.disabled = true;
+      try {
+        await window.jarvis.voice.updateKeyModelVoice({ id: k.id, selectedModel: modelSel.value || null, selectedVoice: voiceSel.value || null });
+        currentKeys = await window.jarvis.voice.getKeys();
+        updateVoiceKeysUI();
+        toast('✓ Saved — Jarvis ab "' + (voiceSel.value || k.selected_voice) + '" voice mein bolega');
+      } catch (e) {
+        toast('✕ ' + e.message, true);
+      } finally { applyBtn.disabled = false; }
+    };
+
+    modelSel.addEventListener('change', async () => {
+      voiceSel.innerHTML = '';
+      voiceSel.appendChild(el('option', { value: '' }, '◌ Loading voices…'));
+      await populateKeyVoices(k, modelSel.value, voiceSel, true);
+      refreshKeyQuotaLine(k, modelSel.value, quotaLine, true);
+    });
+
+    try {
+      const mRes = await window.jarvis.voice.fetchModels('gemini', '', k.custom_endpoint, false, 'tts');
+      const models = (mRes && mRes.models) || [];
+      modelSel.innerHTML = '';
+      models.forEach(m => {
+        const cat = m.modalitySupport && m.modalitySupport.length ? ' [' + m.modalitySupport.join(' · ') + ']' : '';
+        modelSel.appendChild(el('option', { value: m.id }, (m.isLiveCapable ? '⚡ ' : '✦ ') + (m.name || m.id) + cat));
+      });
+      if (k.selected_model && models.find(m => m.id === k.selected_model)) modelSel.value = k.selected_model;
+      else if (models.length) modelSel.value = models[0].id;
+    } catch (e) {
+      modelSel.innerHTML = '';
+      modelSel.appendChild(el('option', { value: k.selected_model || '' }, k.selected_model || '✕ Model fetch failed'));
+    }
+    await populateKeyVoices(k, modelSel.value, voiceSel, false);
+    refreshKeyQuotaLine(k, modelSel.value, quotaLine, false);
+  }
   function updateVoiceKeysUI() {
     keysWrap.innerHTML = '';
     if (!currentKeys.length) {
-      keysWrap.appendChild(el('div', { class: 'empty', style: 'padding:30px 20px;background:#080a08;border:1px dashed var(--line);border-radius:10px' },
+      const emptyCard = el('div', { class: 'empty', style: 'padding:30px 20px;background:#080a08;border:1px dashed var(--line);border-radius:10px' },
         el('div', { class: 'e-ic' }, '♫'),
-        el('div', { class: 'e-tx', style: 'text-align:center' }, 'NO CLOUD VOICE KEYS CONFIGURED YET<br><span style="font-size:9px;color:var(--muted2);text-transform:none">Follow the 9-step verified flow below to connect Google AI (Gemini), ElevenLabs, OpenAI, Groq (Whisper) or Custom endpoint.</span>')
-      ));
+        el('div', { class: 'e-tx', style: 'text-align:center' }, 'KOI VOICE KEY NAHI — NEECHE APNI KEY ADD KAREIN<br><span style="font-size:9px;color:var(--muted2);text-transform:none">Ya Brain API wali Gemini key seedha voice ke liye use karein:</span>')
+      );
+      const reuseBtn = el('button', { class: 'btn primary', style: 'margin:10px auto 0;display:inline-flex;font-size:10px;padding:6px 14px;background:#142840;border-color:#4da6ff;color:#a8d1ff', onclick: async () => {
+        reuseBtn.disabled = true;
+        reuseBtn.textContent = '◌ LINKING…';
+        try {
+          await window.jarvis.voice.reuseGeminiKeyForVoice();
+          currentKeys = await window.jarvis.voice.getKeys();
+          updateVoiceKeysUI();
+          toast('✓ Brain Gemini key voice vault mein link ho gayi (Live model ke sath)!');
+        } catch (err) {
+          toast('Link failed: ' + err.message, true);
+          reuseBtn.disabled = false;
+          reuseBtn.textContent = '✨ USE BRAIN GEMINI KEY FOR VOICE';
+        }
+      } }, '✨ USE BRAIN GEMINI KEY FOR VOICE');
+      emptyCard.appendChild(reuseBtn);
+      keysWrap.appendChild(emptyCard);
       return;
     }
 
@@ -2069,8 +2045,6 @@ async function renderVoice(container) {
             await window.jarvis.voice.setActiveKey(k.id);
             currentKeys = await window.jarvis.voice.getKeys();
             updateVoiceKeysUI();
-            updateVoiceChainUI();
-            await updateDualEngineStatus();
             toast('Active voice provider switched to ' + (k.key_name || k.provider));
           } catch (err) {
             toast('Failed to set active voice key: ' + err.message, true);
@@ -2105,8 +2079,6 @@ async function renderVoice(container) {
             try {
               currentKeys = await window.jarvis.voice.deleteKey(k.id);
               updateVoiceKeysUI();
-              updateVoiceChainUI();
-              await updateDualEngineStatus();
               toast('Voice key removed from vault');
             } catch (err) {
               toast('Failed to delete key: ' + err.message, true);
@@ -2138,13 +2110,16 @@ async function renderVoice(container) {
             const newIds = reordered.map(item => item.id);
             currentKeys = await window.jarvis.voice.reorderKeys(newIds);
             updateVoiceKeysUI();
-            updateVoiceChainUI();
-            await updateDualEngineStatus();
             toast('Voice priority chain updated — #' + (newIdx + 1) + ' is now ' + (moved.key_name || moved.provider));
           } catch (err) {
             toast('Reorder failed: ' + err.message, true);
           }
         });
+      }
+
+      // Per-key voice/model editor (gemini keys): dropdowns hamesha visible
+      if (k.provider === 'gemini') {
+        buildKeyEditor(k, card).catch(e => console.warn('key editor:', e));
       }
 
       keysWrap.appendChild(card);
@@ -2697,9 +2672,6 @@ async function renderVoice(container) {
       // Reload keys from database
       currentKeys = await window.jarvis.voice.getKeys();
       updateVoiceKeysUI();
-      updateVoiceChainUI();
-      await updateDualEngineStatus();
-      await maybeShowSavedKeyEditor();
     } finally {
       flowState.saving = false;
       saveVoiceKeyBtn.disabled = false;
@@ -2761,319 +2733,25 @@ async function renderVoice(container) {
   );
 
   // ═══════════════════════════════════════════════════════════════
-  // VOICE SETTINGS PANEL (Speed, Volume, Language, Mic device)
-  // ═══════════════════════════════════════════════════════════════
-  let currentSettings = {
-    ttsSpeed: 1.0,
-    ttsVolume: 100,
-    sttLanguage: 'auto',
-    pushToTalk: false,
-    micDeviceId: 'default'
-  };
-
-  try {
-    if (window.jarvis?.settings?.get) {
-      const saved = await window.jarvis.settings.get('voice_settings');
-      if (saved) currentSettings = { ...currentSettings, ...saved };
-    }
-  } catch (e) {
-    console.warn('Voice settings load fallback:', e);
-  }
-
-  const speedVal = el('span', { style: 'font-weight:700;color:var(--mint)' }, currentSettings.ttsSpeed + 'x');
-  const speedSlider = el('input', {
-    type: 'range',
-    min: '0.5',
-    max: '2.0',
-    step: '0.1',
-    value: String(currentSettings.ttsSpeed),
-    style: 'flex:1'
-  });
-  speedSlider.oninput = () => {
-    speedVal.textContent = speedSlider.value + 'x';
-    saveVoiceSettings();
-  };
-
-  const volVal = el('span', { style: 'font-weight:700;color:var(--mint)' }, currentSettings.ttsVolume + '%');
-  const volSlider = el('input', {
-    type: 'range',
-    min: '10',
-    max: '100',
-    step: '5',
-    value: String(currentSettings.ttsVolume),
-    style: 'flex:1'
-  });
-  volSlider.oninput = () => {
-    volVal.textContent = volSlider.value + '%';
-    saveVoiceSettings();
-  };
-
-  const langSelect = el('select', { class: 'select', style: 'width:200px' },
-    el('option', { value: 'auto' }, '🌐 Auto-detect (Urdu + English)'),
-    el('option', { value: 'ur' }, '🇵🇰 Urdu (اردو) Priority'),
-    el('option', { value: 'en' }, '🇬🇧 English Priority'),
-    el('option', { value: 'hinglish' }, '🗣 Roman Urdu / Hinglish')
-  );
-  langSelect.value = currentSettings.sttLanguage || 'auto';
-  langSelect.onchange = saveVoiceSettings;
-
-  const modeSelect = el('select', { class: 'select', style: 'width:200px' },
-    el('option', { value: 'toggle' }, '🎙 Click to Record / Toggle'),
-    el('option', { value: 'push' }, '⌨ Push-to-Talk (Hold Space)')
-  );
-  modeSelect.value = currentSettings.pushToTalk ? 'push' : 'toggle';
-  modeSelect.onchange = saveVoiceSettings;
-
-  const micSelect = el('select', { class: 'select', style: 'flex:1;min-width:240px' },
-    el('option', { value: 'default' }, '🎤 Default System Microphone')
-  );
-
-  // Populate mic devices
-  if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
-    navigator.mediaDevices.enumerateDevices().then(devices => {
-      const audioInputs = devices.filter(d => d.kind === 'audioinput');
-      if (audioInputs.length) {
-        micSelect.innerHTML = '';
-        audioInputs.forEach((d, idx) => {
-          micSelect.appendChild(el('option', { value: d.deviceId }, '🎤 ' + (d.label || `Microphone ${idx + 1}`)));
-        });
-        if (currentSettings.micDeviceId) micSelect.value = currentSettings.micDeviceId;
-      }
-    }).catch(err => console.warn('Mic enumeration error:', err));
-  }
-  micSelect.onchange = saveVoiceSettings;
-
-  async function saveVoiceSettings() {
-    const payload = {
-      ttsSpeed: parseFloat(speedSlider.value) || 1.0,
-      ttsVolume: parseInt(volSlider.value, 10) || 100,
-      sttLanguage: langSelect.value,
-      pushToTalk: modeSelect.value === 'push',
-      micDeviceId: micSelect.value
-    };
-    currentSettings = payload;
-    try {
-      if (window.jarvis?.settings?.set) {
-        await window.jarvis.settings.set('voice_settings', payload);
-      }
-    } catch (e) {
-      console.warn('Voice settings save fallback:', e);
-    }
-  }
-
-  const settingsPanel = el('div', { class: 'panel mt14', style: 'background:#060806' },
-    el('div', { class: 'panel-head' },
-      el('div', { class: 'panel-title' }, el('span', { class: 'pt-ic' }, '⚙'), 'VOICE & AUDIO SETTINGS'),
-      el('span', { class: 'badge green' }, '● REALTIME SYNCHRONIZED')
-    ),
-    el('div', { class: 'two-col', style: 'gap:14px' },
-      el('div', { style: 'background:#0a0c0a;padding:12px;border-radius:8px;border:1px solid var(--line2)' },
-        el('div', { class: 'form-label', style: 'margin-bottom:8px' }, 'TTS SPEECH SPEED: ', speedVal),
-        el('div', { style: 'display:flex;align-items:center;gap:10px' },
-          el('span', { style: 'font-size:10px;color:var(--muted)' }, '0.5x'),
-          speedSlider,
-          el('span', { style: 'font-size:10px;color:var(--muted)' }, '2.0x')
-        ),
-        el('div', { class: 'form-label', style: 'margin:14px 0 8px' }, 'TTS PLAYBACK VOLUME: ', volVal),
-        el('div', { style: 'display:flex;align-items:center;gap:10px' },
-          el('span', { style: 'font-size:10px;color:var(--muted)' }, '10%'),
-          volSlider,
-          el('span', { style: 'font-size:10px;color:var(--muted)' }, '100%')
-        )
-      ),
-      el('div', { style: 'background:#0a0c0a;padding:12px;border-radius:8px;border:1px solid var(--line2);display:flex;flex-direction:column;gap:10px' },
-        el('div', {},
-          el('div', { class: 'form-label', style: 'margin-bottom:4px' }, 'SPEECH-TO-TEXT LANGUAGE PRIORITY'),
-          langSelect
-        ),
-        el('div', {},
-          el('div', { class: 'form-label', style: 'margin-bottom:4px' }, 'MICROPHONE CAPTURE MODE'),
-          modeSelect
-        ),
-        el('div', {},
-          el('div', { class: 'form-label', style: 'margin-bottom:4px' }, 'ACTIVE INPUT DEVICE'),
-          micSelect
-        )
-      )
-    )
-  );
 
   // Check Gemini on mount
   checkExistingGeminiKey();
 
+  checkExistingGeminiKey();
+
   // ═══════════════════════════════════════════════════════════
-  // SAVED KEY — CHANGE VOICE/MODEL ANYTIME (dropdown kabhi ghayab nahi hota)
-  // + REAL QUOTA / USAGE (live fetch — koi fake number nahi)
-  // ═══════════════════════════════════════════════════════════
-  const savedKeyPanel = el('div', { style: 'display:none;margin-top:14px;padding:12px;background:rgba(77,166,255,0.05);border:1px solid rgba(77,166,255,0.25);border-radius:10px' });
-  let savedKeyModels = [];
-  let savedKeyVoices = [];
-  let quotaAutoTimer = null;
-
-  const skModelSelect = el('select', { class: 'select', style: 'flex:1;min-width:220px' });
-  const skVoiceSelect = el('select', { class: 'select', style: 'flex:1;min-width:220px' });
-  const skStatus = el('span', { style: 'font-size:9.5px;color:var(--muted)' }, '');
-  const quotaCard = el('div', { style: 'display:none;margin-top:10px;padding:10px 12px;background:#0d110d;border:1px solid var(--line2);border-radius:8px;font-size:10px;line-height:1.55' });
-
-  function fmtQuota(q) {
-    if (!q) return '';
-    if (q.isPaidTierOnly) {
-      return `<div style="color:#ffb84d;font-weight:700">💳 "${q.model || '?'}" PAID-TIER model hai — free tier isay provide hi nahi karta.</div>` +
-        `<div style="color:var(--muted)">Provider: <b style="color:#a8d1ff">${q.provider}</b> → <a href="https://aistudio.google.com/apikey" style="color:#4da6ff">Google AI Studio</a> par ja kar billing add karein, phir yeh model use ho jayega aur usage yahan live nazar aayegi. Ya free-tier model chunein.</div>`;
-    }
-    if (!q.pingOk && q.pingError) {
-      return `<div style="color:#ff8888">✕ Live check fail: ${String(q.pingError).slice(0, 160)}</div>`;
-    }
-    return `<div>◉ Model: <b style="color:var(--mint);font-family:var(--font-mono)">${q.model || 'auto'}</b> — <span style="color:var(--mint)">✓ LIVE OK${q.pingLatencyMs ? ' (' + q.pingLatencyMs + 'ms)' : ''}</span></div>` +
-      `<div style="color:var(--muted)">Free tier: har request live verify hoti hai • Paid tier: exact usage Google AI Studio dashboard mein nazar aata hai.</div>` +
-      `<div style="color:var(--muted)">Is session ki local usage: <b style="color:var(--text)">${q.local?.sessionRequests ?? 0}</b> speech requests • last used: ${q.local?.lastUsed ? new Date(q.local.lastUsed).toLocaleTimeString() : 'never'}</div>`;
-  }
-
-  async function refreshQuotaCard(model, force) {
-    const keyRow = currentKeys.find(k => k.is_active && k.provider === 'gemini') || currentKeys.find(k => k.provider === 'gemini');
-    if (!keyRow || !model) { quotaCard.style.display = 'none'; return; }
-    try {
-      const q = await window.jarvis.voice.getModelQuota('gemini', keyRow.raw_key, model, !!force);
-      quotaCard.innerHTML = fmtQuota(q);
-      quotaCard.style.display = 'block';
-    } catch (e) {
-      quotaCard.innerHTML = `<div style="color:#ff8888">✕ Quota fetch failed: ${String(e.message).slice(0, 120)}</div>`;
-      quotaCard.style.display = 'block';
-    }
-  }
-
-  async function openSavedKeyEditor(keyRow) {
-    savedKeyPanel.style.display = 'block';
-    savedKeyPanel.innerHTML = '';
-    skStatus.textContent = '';
-    savedKeyPanel.append(
-      el('div', { style: 'display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:8px' },
-        el('div', { style: 'font-size:11px;font-weight:700;color:#a8d1ff' }, '♫ CHANGE VOICE / MODEL — "' + (keyRow.key_name || 'saved key') + '"'),
-        el('button', { class: 'btn', style: 'font-size:9px;padding:3px 10px', onclick: () => { savedKeyPanel.style.display = 'none'; if (quotaAutoTimer) { clearInterval(quotaAutoTimer); quotaAutoTimer = null; } } }, '✕ CLOSE')
-      ),
-      el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap;align-items:center' }, skModelSelect, skVoiceSelect),
-      el('div', { style: 'margin-top:6px' }, skStatus),
-      quotaCard,
-      skApplyBtn
-    );
-
-    skVoiceSelect.innerHTML = '';
-    skVoiceSelect.appendChild(el('option', { value: '' }, '◌ Loading live voices…'));
-    skModelSelect.innerHTML = '';
-    skModelSelect.appendChild(el('option', { value: '' }, '◌ Loading live models…'));
-
-    const key = keyRow.raw_key;
-    try {
-      const mRes = await window.jarvis.voice.fetchModels('gemini', key, keyRow.custom_endpoint, false, 'tts');
-      savedKeyModels = mRes?.models || [];
-      skModelSelect.innerHTML = '';
-      savedKeyModels.forEach(m => {
-        const cat = m.modalitySupport && m.modalitySupport.length ? ' [' + m.modalitySupport.join(' · ') + ']' : '';
-        skModelSelect.appendChild(el('option', { value: m.id }, (m.isLiveCapable ? '⚡ ' : '✦ ') + (m.name || m.id) + cat));
-      });
-      const keepM = savedKeyModels.find(m => m.id === keyRow.selected_model);
-      skModelSelect.value = keepM ? keyRow.selected_model : (savedKeyModels[0] ? savedKeyModels[0].id : '');
-    } catch (e) {
-      skModelSelect.innerHTML = '';
-      skModelSelect.appendChild(el('option', { value: keyRow.selected_model || '' }, keyRow.selected_model || '✕ Model fetch failed'));
-    }
-
-    await loadSavedVoices(keyRow, skModelSelect.value);
-
-    if (quotaAutoTimer) clearInterval(quotaAutoTimer);
-    quotaAutoTimer = setInterval(() => {
-      if (savedKeyPanel.style.display === 'none') { clearInterval(quotaAutoTimer); quotaAutoTimer = null; return; }
-      refreshQuotaCard(skModelSelect.value, false);
-    }, 60 * 1000);
-    refreshQuotaCard(skModelSelect.value, false);
-  }
-
-  async function loadSavedVoices(keyRow, model) {
-    const key = keyRow.raw_key;
-    skVoiceSelect.innerHTML = '';
-    skVoiceSelect.appendChild(el('option', { value: '' }, '◌ Loading live voices for ' + (model || 'model') + '…'));
-    try {
-      const vRes = await window.jarvis.voice.fetchVoices('gemini', key, keyRow.custom_endpoint, true, model);
-      savedKeyVoices = vRes?.voices || [];
-      skVoiceSelect.innerHTML = '';
-      savedKeyVoices.forEach(v => {
-        const gender = (v.gender || 'neutral').toLowerCase();
-        const gIcon = gender === 'male' ? '♂' : gender === 'female' ? '♀' : '⚪';
-        const langs = Array.isArray(v.langs) && v.langs.length ? v.langs.join('/') : '';
-        skVoiceSelect.appendChild(el('option', { value: v.id }, `♫ ${v.name || v.id} — ${gIcon} ${gender}${langs ? ' · 🌐 ' + langs : ''}`));
-      });
-      const keepV = savedKeyVoices.find(v => v.id === keyRow.selected_voice);
-      skVoiceSelect.value = keepV ? keyRow.selected_voice : (savedKeyVoices[0] ? savedKeyVoices[0].id : '');
-    } catch (e) {
-      skVoiceSelect.innerHTML = '';
-      skVoiceSelect.appendChild(el('option', { value: keyRow.selected_voice || '' }, keyRow.selected_voice || '✕ Voice fetch failed'));
-      skStatus.innerHTML = '<span style="color:#ff8888">✕ ' + String(e.message).slice(0, 140) + '</span>';
-    }
-  }
-
-  skModelSelect.addEventListener('change', async () => {
-    const keyRow = currentKeys.find(k => k.is_active && k.provider === 'gemini') || currentKeys.find(k => k.provider === 'gemini');
-    if (!keyRow) return;
-    skStatus.innerHTML = '<span class="spin">◌</span> Naye model ki live voices aa rahi hain…';
-    await loadSavedVoices(keyRow, skModelSelect.value);
-    skStatus.textContent = 'Model selected: ' + skModelSelect.value + ' — voice chunein ya seedha "Apply" dabayen.';
-    refreshQuotaCard(skModelSelect.value, true);
-  });
-
-  skVoiceSelect.addEventListener('change', () => {
-    skStatus.textContent = 'Voice selected: ' + skVoiceSelect.value + ' — "Apply" dabayen ya seedha naye model/voice se Jarvis ki baatein sun lein.';
-  });
-
-  const skApplyBtn = el('button', { class: 'btn primary', style: 'margin-top:8px;font-size:10px;padding:5px 14px;background:var(--mint);color:#000;border-color:var(--mint)' }, '✓ APPLY (Save karein is key par)');
-  skApplyBtn.onclick = async () => {
-    const keyRow = currentKeys.find(k => k.is_active && k.provider === 'gemini') || currentKeys.find(k => k.provider === 'gemini');
-    if (!keyRow) { skStatus.innerHTML = '<span style="color:#ff8888">✕ Gemini key vault mein nahi mili</span>'; return; }
-    if (!skModelSelect.value && !skVoiceSelect.value) { skStatus.innerHTML = '<span style="color:#ff8888">✕ Pehle model/voice select karein</span>'; return; }
-    skStatus.innerHTML = '<span class="spin">◌</span> Saving…';
-    try {
-      await window.jarvis.voice.updateKeyModelVoice({ id: keyRow.id, selectedModel: skModelSelect.value || null, selectedVoice: skVoiceSelect.value || null });
-      currentKeys = await window.jarvis.voice.getKeys();
-      updateVoiceKeysUI();
-      updateVoiceChainUI();
-      await updateDualEngineStatus();
-      skStatus.innerHTML = '<span style="color:var(--mint)">✓ Saved! Jarvis ab <b>' + (skVoiceSelect.value || 'selected voice') + '</b> voice mein, <b>' + (skModelSelect.value || 'selected model') + '</b> par bolega.</span>';
-      toast('✓ Voice/Model change saved — ab isi selection par bolega!');
-    } catch (e) {
-      skStatus.innerHTML = '<span style="color:#ff8888">✕ ' + String(e.message).slice(0, 140) + '</span>';
-    }
-  };
-  savedKeyPanel.append(skApplyBtn);
-
-  async function maybeShowSavedKeyEditor() {
-    const gk = currentKeys.find(k => k.is_active && k.provider === 'gemini') || currentKeys.find(k => k.provider === 'gemini');
-    if (gk && gk.selected_voice) {
-      await openSavedKeyEditor(gk);
-    } else {
-      savedKeyPanel.style.display = 'none';
-    }
-  }
-
-  // Assemble Main Voice Tab Panel
+  /* Old saved-key editor panel: REMOVED in cleanup */
+  // dropdowns + quota) aur add-key flow. Sab extra dashboards/chains REMOVED.
   container.append(
     el('div', { class: 'panel' },
       el('div', { class: 'panel-head' },
-        el('div', { class: 'panel-title' }, el('span', { class: 'pt-ic' }, '♪'), 'VOICE API — CLOUD STT & TTS ENGINES'),
-        el('span', { class: 'badge green' }, '● PRIORITY CHAIN: ACTIVE')
-      ),
-      dualEngineStatusCard,
-      savedKeyPanel,
-      el('div', { class: 'form-row' },
-        el('div', { class: 'form-label' }, '◈ SPEECH FALLBACK CHAIN (drag ⋮⋮ to reorder fallback sequence)'),
-        chainRow
+        el('div', { class: 'panel-title' }, el('span', { class: 'pt-ic' }, '♪'), 'VOICE API'),
+        el('span', { class: 'badge green' }, '● LIVE ENGINE')
       ),
       keysWrap,
-      flowBox,
-      settingsPanel
+      flowBox
     )
-  );
-
-  // Agar pehle se saved Gemini voice key hai to voice-change panel foran dikha do
-  maybeShowSavedKeyEditor().catch(e => console.warn('saved key editor:', e));
+  )
 }
 
 /* ═══════════════════════════════════ 6. MEMORY — LIVE SQLite ═══════════════════════════════════ */
