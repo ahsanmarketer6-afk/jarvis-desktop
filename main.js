@@ -219,6 +219,11 @@ ipcMain.handle('backup:pickDir', async () => {
   return r.canceled ? null : r.filePaths[0];
 });
 
+// ─── IPC: Chat history persistence (Phase 5 fix) ──────────────────
+ipcMain.handle('chat:insert', (_e, { role, content, tag }) => db.insertChatMessage({ role, content, tag }));
+ipcMain.handle('chat:list', (_e, opts) => db.listChatMessages(opts || {}));
+ipcMain.handle('chat:clear', () => db.clearChatMessages());
+
 // ─── IPC: Orchestrator + Agent Framework (Phase 4) ─────────────────
 ipcMain.handle('orch:run', async (event, { request, source, forceClassification, requestId }) => {
   const onProgress = (payload) => {

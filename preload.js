@@ -101,6 +101,11 @@ contextBridge.exposeInMainWorld('jarvis', {
     getAutoExtract: () => ipcRenderer.invoke('memory:getAutoExtract'),
     extractNow: () => ipcRenderer.invoke('memory:extractNow')
   },
+  chat: {
+    insert: (role, content, tag) => ipcRenderer.invoke('chat:insert', { role, content, tag }),
+    list: (opts) => ipcRenderer.invoke('chat:list', opts || {}),
+    clear: () => ipcRenderer.invoke('chat:clear')
+  },
   backup: {
     create: (opts) => ipcRenderer.invoke('backup:create', opts || {}),
     inspect: (filePath) => ipcRenderer.invoke('backup:inspect', filePath),

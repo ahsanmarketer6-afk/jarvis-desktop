@@ -130,6 +130,16 @@ function detectLang(text) {
 
 function renderChat(container) {
   chatState.messages = chatState.messages.length ? chatState.messages : CHAT_SEED.map(m => ({ ...m }));
+  // Phase 5 fix: SQLite se chat history restore (restart-proof) — sirf pehli dafa
+  if (!chatState._loadedFromDb && window.jarvis?.chat?.list) {
+    chatState._loadedFromDb = true;
+    window.jarvis.chat.list({ limit: 100 }).then(rows => {
+      if (rows && rows.length) {
+        chatState.messages = rows.map(r => ({ role: r.role === 'assistant' ? 'jarvis' : 'user', text: r.content, tag: r.tag || '' }));
+        if (__chatUi && __chatUi.renderMsgs) __chatUi.renderMsgs(__chatUi.scroll);
+      }
+    }).catch(() => {});
+  }
   container.classList.add('chat-full');
   container.innerHTML = '';
   container.style.padding = '14px';
@@ -418,6 +428,14 @@ function renderChat(container) {
         } else {
           chatState.messages.push({ role, text: data.text, _live: true });
         }
+        // Phase 5 fix: live transcript bhi SQLite mein (turn-complete par hi save hota hai via debounce below)
+        clearTimeout(chatState._liveSaveT);
+        chatState._liveSaveT = setTimeout(() => {
+          if (chatState.messages.length && window.jarvis?.chat?.insert) {
+            const lm = chatState.messages[chatState.messages.length - 1];
+            if (lm && lm.text) window.jarvis.chat.insert(lm.role === 'jarvis' ? 'assistant' : 'user', lm.text, 'live').catch(() => {});
+          }
+        }, 1500);
         chatRenderMsgs();
       }
     });
@@ -919,6 +937,10 @@ function renderChat(container) {
   function pushMsg(m) {
     chatState.messages.push(m);
     renderMsgs(scroll);
+    // Phase 5 fix: SQLite mein persist (restart ke baad bhi chat zinda rahe)
+    if (!m.typing && m.text && window.jarvis?.chat?.insert) {
+      window.jarvis.chat.insert(m.role === 'jarvis' ? 'assistant' : 'user', m.text, m.tag || null).catch(() => {});
+    }
     if (m.role === 'user') {
       // Live session chal raha ho to typed text bhi USI realtime conversation
       // mein jata hai (clientContent turn) — Jarvis usi voice mein bol kar jawab
@@ -1073,6 +1095,7 @@ function renderChat(container) {
 
         // Voice playback trigger
         if (typingMsg.text) {
+          if (window.jarvis?.chat?.insert) window.jarvis.chat.insert('assistant', typingMsg.text, typingMsg.tag || null).catch(() => {});
           speakResponse(typingMsg.text);
         }
       } else {
@@ -1197,6 +1220,7 @@ function renderChat(container) {
       if (!typingMsg.text && res && res.result) typingMsg.text = res.result;
       if (res && res.classification) typingMsg.tag = (res.classification === 'memory' ? '📌 ' : 'Orchestrator · ') + res.classification;
       panel.finish(true, res.classification || 'done');
+      if (typingMsg.text && window.jarvis?.chat?.insert) window.jarvis.chat.insert('assistant', typingMsg.text, typingMsg.tag || null).catch(() => {});
       if (typingMsg.text) speakResponse(typingMsg.text);
     } catch (err) {
       const msg = err?.message || 'orchestration failed';

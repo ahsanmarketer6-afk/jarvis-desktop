@@ -201,6 +201,22 @@ const MIGRATIONS = [
         }
       } catch (e) { /* legacy table may be empty/missing — non-fatal */ }
     }
+  },
+  {
+    version: 6,
+    name: 'chat-messages-persistence',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS chat_messages (
+          id         INTEGER PRIMARY KEY AUTOINCREMENT,
+          role       TEXT NOT NULL CHECK (role IN ('user','assistant')),
+          content    TEXT NOT NULL,
+          tag        TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_chat_msgs_id ON chat_messages(id);
+      `);
+    }
   }
 ];
 

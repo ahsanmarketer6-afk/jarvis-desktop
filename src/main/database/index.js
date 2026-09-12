@@ -544,12 +544,32 @@ function updateBackupHistory(id, { status } = {}) {
   return true;
 }
 
+/* ─── Chat history (Phase 5 fix: chat bhi SQLite mein — restart-proof) ── */
+
+function insertChatMessage({ role, content, tag = null }) {
+  if (!/^(user|assistant)$/.test(role) || !String(content || '').trim()) return null;
+  const info = db.prepare('INSERT INTO chat_messages (role, content, tag) VALUES (?, ?, ?)')
+    .run(role, String(content).slice(0, 20000), tag ? String(tag).slice(0, 100) : null);
+  return info.lastInsertRowid;
+}
+
+function listChatMessages({ limit = 200 } = {}) {
+  // Oldest-first last-N window for UI restore
+  const rows = db.prepare('SELECT * FROM (SELECT * FROM chat_messages ORDER BY id DESC LIMIT ?) ORDER BY id ASC').all(limit);
+  return rows;
+}
+
+function clearChatMessages() {
+  const info = db.prepare('DELETE FROM chat_messages').run();
+  return info.changes;
+}
+
 /* ─── status for Settings UI ────────────────────────────────────── */
 
 function status() {
   if (!db) return { connected: false };
   const tables = {};
-  for (const t of ['api_keys', 'voice_keys', 'settings', 'memory', 'memories', 'backup_history', 'activity_log', 'workflows', 'notifications', 'agent_runs', 'agent_steps', 'schema_version']) {
+  for (const t of ['api_keys', 'voice_keys', 'settings', 'memory', 'memories', 'chat_messages', 'backup_history', 'activity_log', 'workflows', 'notifications', 'agent_runs', 'agent_steps', 'schema_version']) {
     try {
       tables[t] = db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get().n;
     } catch (e) {
@@ -594,5 +614,6 @@ module.exports = {
   getAgentRun, listAgentRuns, getAgentSteps, getAgentStats,
   insertMemory, listMemories, updateMemoryV2, deleteMemoryV2, deleteAllMemoriesV2,
   touchMemory, getMemoryStatsV2, getActiveMemories,
-  insertBackupHistory, listBackupHistory, updateBackupHistory
+  insertBackupHistory, listBackupHistory, updateBackupHistory,
+  insertChatMessage, listChatMessages, clearChatMessages
 };
