@@ -93,6 +93,29 @@ function openModal({ title, sub, body, actions }) {
 }
 function closeModal() { document.getElementById('modal-root').innerHTML = ''; }
 
+/* ─── Voice engine shared state (module-level: tab re-renders se bachata hai) ───
+   Tab switch par renderChat dobara chalta hai — mic/live/audio state yahan rakne
+   se session orphan nahi hoti, aur live IPC listeners sirf EK dafa register hote
+   hain (duplicate listeners ne transcripts interleave kar ke "kabhi kuch aur
+   bolta hai" wala behavior banaya tha). */
+let currentAudioPlayer = null;
+let activeMediaRecorder = null;
+let audioContext = null;
+let scriptProcessor = null;
+let pcmBuffers = [];
+let pcmLength = 0;
+let liveActive = false;
+let liveAudioCtx = null;
+let liveNextPlayTime = 0;
+let activeLiveSources = [];
+let liveCapableCache = null; // null = unknown; true/false = vault model Live-capable?
+let __chatUi = null; // { statusLeft, applyState, interruptBtn, scroll, renderMsgs }
+
+function setChatStatus(text) { if (__chatUi && __chatUi.statusLeft) __chatUi.statusLeft.textContent = text; }
+function chatApplyState(id) { if (__chatUi && __chatUi.applyState) __chatUi.applyState(id); }
+function chatInterruptBtn() { return __chatUi ? __chatUi.interruptBtn : null; }
+function chatRenderMsgs() { if (__chatUi && __chatUi.renderMsgs) __chatUi.renderMsgs(__chatUi.scroll); }
+
 /* ═══════════════════════════════════ 1. CHAT — 3-column HUD ═══════════════════════════════════ */
 
 let chatState = { busy: false, messages: [], state: 'idle', micOn: false };
@@ -194,18 +217,8 @@ function renderChat(container) {
   const stateChip = el('b', {}, 'IDLE');
   const globeStage = el('div', { class: 'globe-stage' });
 
-  // ─── AUDIO ENGINE: Direct 16kHz PCM WAV Recorder & Web Audio Player ───
-  let currentAudioPlayer = null;
-  let activeMediaRecorder = null;
-  let audioChunks = [];
-  let audioContext = null;
-  let scriptProcessor = null;
-  let pcmBuffers = [];
-  let pcmLength = 0;
-  let liveActive = false;
-  let liveAudioCtx = null;
-  let liveNextPlayTime = 0;
-  let activeLiveSources = [];
+  // Audio/mic/live state MODULE level par hai (upar dekhein) — tab re-render par
+  // bhi chalti hui recording ya live session orphan nahi hoti.
 
   // ─── AUTO-SEND (Standard/TTS mode) + instant-mic helpers ───
   // Standard mode: jab user ki baat complete ho jaye (speech detected → ~1.6s continuous
@@ -322,10 +335,11 @@ function renderChat(container) {
       try { window.speechSynthesis.cancel(); } catch (e) {}
     }
     if (chatState.state === 'speaking') {
-      applyState('idle');
-      statusLeft.textContent = 'Speech interrupted';
+      chatApplyState('idle');
+      setChatStatus('Speech interrupted');
     }
-    interruptBtn.style.display = 'none';
+    const ib = chatInterruptBtn();
+    if (ib) ib.style.display = 'none';
   }
 
   // Play Live 24kHz PCM chunks through Web Audio API
@@ -375,16 +389,19 @@ function renderChat(container) {
         }
       };
 
-      applyState('speaking');
-      statusLeft.textContent = 'Jarvis is speaking (Gemini Live Dialog)…';
-      interruptBtn.style.display = 'inline-block';
+      chatApplyState('speaking');
+      setChatStatus('Jarvis is speaking (Gemini Live Dialog)…');
+      const ib = chatInterruptBtn();
+      if (ib) ib.style.display = 'inline-block';
     } catch (err) {
       console.warn('[Live Audio Player] Error playing PCM chunk:', err);
     }
   }
 
-  // Setup Live API event listeners if supported
-  if (window.jarvis?.voice?.live) {
+  // Setup Live API event listeners — EXACTLY ONCE (guard): duplicate IPC
+  // listeners ne pehle transcript ko interleave kar diya tha (har turn 2x).
+  if (window.jarvis?.voice?.live && !window.__liveListenersBound) {
+    window.__liveListenersBound = true;
     window.jarvis.voice.live.onAudio((data) => {
       if (data && data.data) {
         playLivePcmChunk(data.data, data.mimeType);
@@ -401,29 +418,29 @@ function renderChat(container) {
         } else {
           chatState.messages.push({ role, text: data.text, _live: true });
         }
-        renderMsgs(scroll);
+        chatRenderMsgs();
       }
     });
 
     window.jarvis.voice.live.onInterrupted(() => {
       console.log('[Live Mode] User interrupted model speech -> clearing audio queue');
       stopSpeaking();
-      statusLeft.textContent = 'Listening to you… (interrupted)';
-      applyState('listening');
+      setChatStatus('Listening to you… (interrupted)');
+      chatApplyState('listening');
     });
 
     window.jarvis.voice.live.onTurnComplete(() => {
       console.log('[Live Mode] Turn complete');
       if (activeLiveSources.length === 0) {
-        applyState('idle');
-        statusLeft.textContent = 'Live voice active — bolo Boss';
+        chatApplyState('idle');
+        setChatStatus('⚡ Live voice active — bolo Boss');
       }
     });
 
     window.jarvis.voice.live.onError((data) => {
       console.error('[Live Mode] Error:', data);
       toast('Live Mode Error: ' + (data.error || 'Connection failure'), true);
-      statusLeft.textContent = 'Live Mode error: ' + (data.error || 'Connection lost');
+      setChatStatus('Live Mode error: ' + (data.error || 'Connection lost'));
       stopLiveMode();
     });
 
@@ -431,13 +448,13 @@ function renderChat(container) {
       window.jarvis.voice.live.onStatus((data) => {
         console.log('[Live Mode] Status update:', data);
         if (data.status === 'reconnecting') {
-          statusLeft.textContent = `⚡ Live API reconnecting (Attempt ${data.attempt}/3)…`;
+          setChatStatus(`⚡ Live API reconnecting (Attempt ${data.attempt}/3)…`);
           toast(`⚡ Live connection reconnecting (Attempt ${data.attempt})…`);
         } else if (data.status === 'connected') {
-          statusLeft.textContent = '⚡ Live voice active — bolo Boss';
+          setChatStatus('⚡ Live voice active — bolo Boss');
           toast('⚡ Gemini Live Session Connected!');
         } else if (data.status === 'closed' && liveActive) {
-          statusLeft.textContent = '⚡ Live session closed';
+          setChatStatus('⚡ Live session closed');
         }
       });
     }
@@ -454,38 +471,56 @@ function renderChat(container) {
     }
   }, '■ Stop Voice');
 
-  // Voice Mode selector (Standard vs Live API)
-  let voiceMode = 'standard'; // 'standard' | 'live'
-  const voiceModeBtn = el('button', {
-    class: 'btn small',
-    style: 'font-size:10px;padding:3px 8px;background:rgba(46,230,168,0.08);border-color:rgba(46,230,168,0.3);color:var(--mint)',
-    title: 'Toggle between Standard Cloud STT/TTS and Gemini Live API Realtime Dialog',
-    onclick: () => {
-      if (voiceMode === 'standard') {
-        voiceMode = 'live';
-        voiceModeBtn.innerHTML = '⚡ <b>Live Mode</b> (Realtime)';
-        voiceModeBtn.style.color = '#4da6ff';
-        voiceModeBtn.style.borderColor = 'rgba(77,166,255,0.4)';
-        voiceModeBtn.style.background = 'rgba(77,166,255,0.1)';
-        toast('Switched to Gemini Live Mode ⚡ — Realtime bidirectional speech');
-      } else {
-        if (liveActive) stopLiveMode();
-        voiceMode = 'standard';
-        voiceModeBtn.innerHTML = '✦ <b>Standard Voice</b> (STT/TTS)';
-        voiceModeBtn.style.color = 'var(--mint)';
-        voiceModeBtn.style.borderColor = 'rgba(46,230,168,0.3)';
-        voiceModeBtn.style.background = 'rgba(46,230,168,0.08)';
-        toast('Switched to Standard Voice Mode (STT / Brain / TTS)');
-      }
-    }
-  }, '✦ <b>Standard Voice</b> (STT/TTS)');
+  // ─── VOICE MODE: AUTO (koi manual toggle nahi — confusion khatam) ───
+  // Vault mein Live-capable model (native-audio / live dialog) saved ho to mic
+  // click = REALTIME Live conversation. TTS-only model ho to Standard mode.
+  let voiceMode = 'auto';
+  try { voiceMode = localStorage.getItem('jarvis_voice_mode') || 'auto'; } catch (e) {}
+  const voiceModeBtn = el('span', { class: 'hud-tag', id: 'voice-mode-tag', style: 'color:var(--muted)' }, '◌ VOICE MODE…');
 
-  // ─── LIVE MODE START / STOP ───
+  async function resolveVoiceMode() {
+    if (voiceMode !== 'auto') return voiceMode;
+    if (liveCapableCache !== null) return liveCapableCache ? 'live' : 'standard';
+    try {
+      const cfg = await window.jarvis.voice.getActiveConfig();
+      const model = cfg && cfg.tts ? String(cfg.tts.model || '') : '';
+      liveCapableCache = /live|native-audio|realtime|bidi/i.test(model);
+    } catch (e) {
+      liveCapableCache = false;
+    }
+    return liveCapableCache ? 'live' : 'standard';
+  }
+
+  async function updateVoiceModeBadge() {
+    const mode = await resolveVoiceMode();
+    if (mode === 'live') {
+      voiceModeBtn.textContent = '⚡ LIVE VOICE — realtime (auto)';
+      voiceModeBtn.style.color = '#4da6ff';
+    } else {
+      voiceModeBtn.textContent = '✦ STANDARD VOICE (auto)';
+      voiceModeBtn.style.color = 'var(--mint)';
+    }
+  }
+
+  // Capture graph cleanup (mic nodes) — start/stop dono paths use karte hain
+  function cleanupCaptureGraph() {
+    if (scriptProcessor) {
+      try { scriptProcessor.disconnect(); } catch (e) {}
+      scriptProcessor = null;
+    }
+    if (audioContext && audioContext.state !== 'closed') {
+      try { audioContext.close(); } catch (e) {}
+    }
+    audioContext = null;
+  }
+
+  // ─── LIVE MODE START / STOP (realtime conversation) ───
   async function startLiveMode() {
+    if (liveActive) return;
     stopSpeaking();
     try {
-      applyState('thinking');
-      statusLeft.textContent = 'Connecting to Gemini Live API WebSocket…';
+      chatApplyState('thinking');
+      setChatStatus('Connecting to Gemini Live API WebSocket…');
       toast('Connecting to Gemini Live API… ⚡');
 
       let voiceSettings = { micDeviceId: 'default' };
@@ -494,10 +529,9 @@ function renderChat(container) {
         if (saved) voiceSettings = { ...voiceSettings, ...saved };
       }
 
-      // 1. Initialize WebSocket session in main process
-      await window.jarvis.voice.live.start({});
-
-      // 2. Start microphone AudioContext streaming
+      // 1. MIC FIRST — capture foran shuru; chunks main-process ke pre-setup
+      //    buffer mein queue hote hain, is liye websocket handshake (~1s) ke
+      //    dauran bhi user ke pehle labz kabhi drop nahi hote.
       const audioConstraints = voiceSettings.micDeviceId && voiceSettings.micDeviceId !== 'default'
         ? { deviceId: { exact: voiceSettings.micDeviceId } }
         : true;
@@ -521,28 +555,45 @@ function renderChat(container) {
         if (!liveActive) return;
         const inputData = e.inputBuffer.getChannelData(0);
         const base64Chunk = floatToPcm16Base64(inputData);
-        window.jarvis.voice.live.sendAudio(base64Chunk);
+        // ONE-WAY stream channel (no IPC round-trip per 128ms chunk — the old
+        // awaited invoke path added huge conversational latency)
+        window.jarvis.voice.live.streamAudio(base64Chunk);
       };
 
+      // NO loopback: mic input ko speakers par wapas route karna Jarvis ki apni
+      // awaaz ko model tak pohnchata tha (halo/duplicate-answer bug).
       source.connect(scriptProcessor);
-      scriptProcessor.connect(audioContext.destination);
 
       liveActive = true;
       chatState.recording = true;
-      micBtn.classList.add('mic-on');
-      // Call button bhi live session ko follow karta hai (visible session indicator)
-      chatState.callLive = true;
-      callBtn.classList.add('call-active');
-      callBtn.innerHTML = '✕';
-      applyState('listening');
-      statusLeft.textContent = '⚡ Live voice active — bolte raho (mic ON jab tak khud band na karein)';
-      toast('⚡ Gemini Live Mode active — realtime conversation shuru! (mic ON rehta hai)');
+      const mb = document.getElementById('mic-master');
+      if (mb) mb.classList.add('mic-on');
+      chatApplyState('listening');
+      setChatStatus('⚡ Mic live — session connect ho raha hai…');
+
+      // 2. WebSocket session (exact saved model + voice) — async; mic pehle se ON
+      await window.jarvis.voice.live.start({});
+
+      setChatStatus('⚡ Live voice active — bolte raho (mic ON jab tak khud band na karein)');
+      toast('⚡ Gemini Live Mode active — realtime conversation! (mic ON rehta hai)');
     } catch (err) {
       console.error('[Live Mode] Start error:', err);
-      toast('Live Mode error: ' + err.message, true);
-      statusLeft.textContent = 'Live Mode failed: ' + err.message;
-      applyState('idle');
       liveActive = false;
+      chatState.recording = false;
+      const mb = document.getElementById('mic-master');
+      if (mb) mb.classList.remove('mic-on');
+      cleanupCaptureGraph();
+      // Auto mode: agar selected model Live-capable nahi nikla to Standard mode
+      // pe seedha fall back karo — user ko ritual na karna pare.
+      if (/not a Live API/i.test(err.message || '') && voiceMode === 'auto') {
+        toast('ℹ Selected model Live-capable nahi — Standard Voice Mode use ho raha hai');
+        liveCapableCache = false;
+        updateVoiceModeBadge();
+        return startRecordingStandard();
+      }
+      toast('Live Mode error: ' + err.message, true);
+      setChatStatus('Live Mode failed: ' + err.message);
+      chatApplyState('idle');
     }
   }
 
@@ -550,36 +601,29 @@ function renderChat(container) {
     liveActive = false;
     chatState.recording = false;
     micBtn.classList.remove('mic-on');
-    chatState.callLive = false;
-    callBtn.classList.remove('call-active');
-    callBtn.innerHTML = '✆';
     stopSpeaking();
-
-    if (scriptProcessor) {
-      try { scriptProcessor.disconnect(); } catch (e) {}
-      scriptProcessor = null;
-    }
-    if (audioContext && audioContext.state !== 'closed') {
-      try { audioContext.close(); } catch (e) {}
-      audioContext = null;
-    }
+    cleanupCaptureGraph();
     if (window.jarvis?.voice?.live?.stop) {
       await window.jarvis.voice.live.stop();
     }
-    applyState('idle');
-    statusLeft.textContent = 'Live session ended';
+    chatApplyState('idle');
+    setChatStatus('Live session ended');
+  }
+
+  // ─── MIC ENTRY: single button, instant ───
+  // Auto-mode: Live-capable model saved ho to LIVE realtime session, warna Standard.
+  async function startRecording() {
+    if (liveActive || chatState.recording) return;
+    const mode = await resolveVoiceMode();
+    if (mode === 'live') return startLiveMode();
+    return startRecordingStandard();
   }
 
   // ─── STANDARD MODE MIC RECORDING (Direct 16kHz PCM / WAV capture) ───
-  async function startRecording() {
-    if (voiceMode === 'live') {
-      return startLiveMode();
-    }
-
+  async function startRecordingStandard() {
     stopSpeaking();
     pcmBuffers = [];
     pcmLength = 0;
-    audioChunks = [];
 
     try {
       let voiceSettings = { sttLanguage: 'auto', micDeviceId: 'default' };
@@ -688,10 +732,8 @@ function renderChat(container) {
       };
 
       chatState.recording = true;
-      chatState.callLive = true;
-      micBtn.classList.add('mic-on');
-      callBtn.classList.add('call-active');
-      callBtn.innerHTML = '✕';
+      const mb = document.getElementById('mic-master');
+      if (mb) mb.classList.add('mic-on');
       applyState('listening');
       statusLeft.textContent = '🎙 Listening… (baat khatam hote hi AUTO-SEND ho jayegi)';
       toast('🎙 Mic instantly ON — boliye, baat khatam hote hi khud send ho jayegi');
@@ -705,7 +747,7 @@ function renderChat(container) {
 
   function stopRecording() {
     clearSilenceMonitor();
-    if (voiceMode === 'live') {
+    if (liveActive) {
       return stopLiveMode();
     }
 
@@ -714,43 +756,25 @@ function renderChat(container) {
       activeMediaRecorder = null;
     }
     chatState.recording = false;
-    micBtn.classList.remove('mic-on');
-    // Mic band = session indicator bhi reset (dono buttons sync)
-    chatState.callLive = false;
-    callBtn.classList.remove('call-active');
-    callBtn.innerHTML = '✆';
+    const mb = document.getElementById('mic-master');
+    if (mb) mb.classList.remove('mic-on');
   }
 
+  // ─── SINGLE MIC BUTTON — globe ke neeche AB SIRF YEHIC ───
+  // Call ✆ aur Camera 📷 buttons REMOVE (user request: 3 buttons confusion karti
+  // thin). Ek click = instant mic ON/OFF; Live model par realtime session.
   const micBtn = el('button', {
     class: 'call-btn',
     id: 'mic-master',
-    title: 'Microphone — click to speak / hold to talk',
+    title: 'Mic — instant ON/OFF (Live model par realtime conversation)',
     onclick: () => {
-      if (chatState.recording) {
+      if (chatState.recording || liveActive) {
         stopRecording();
       } else {
         startRecording();
       }
     }
   }, '🎙');
-
-  const camBtn = el('button', { class: 'call-btn', id: 'cam-master', title: 'Camera — click to open camera feed', onclick: () => {
-    openCameraModal();
-  } }, '📷');
-
-  // CALL BUTTON = MIC BUTTON (instant). Pehle pehle call daba kar phir mic dabana
-  // parta tha — woh ritual khatam. Dono buttons seedha mic start/stop karte hain.
-  const callBtn = el('button', { class: 'call-btn call-active', id: 'call-master', title: 'Voice — INSTANT mic on/off (mic button jaisa)', onclick: () => {
-    if (chatState.recording) {
-      stopRecording();
-      applyState('idle');
-      statusLeft.textContent = 'Voice session ended';
-    } else {
-      startRecording();
-    }
-    callBtn.classList.toggle('call-active', chatState.callLive);
-    callBtn.innerHTML = chatState.callLive ? '✕' : '✆';
-  } }, '✕');
 
   const center = el('div', { class: 'globe-center' },
     el('div', { class: 'globe-top-row' },
@@ -764,7 +788,7 @@ function renderChat(container) {
       )
     ),
     globeStage,
-    el('div', { class: 'call-bar' }, camBtn, callBtn, micBtn),
+    el('div', { class: 'call-bar' }, micBtn),
     el('div', { class: 'state-bar' },
       ...[
         ['idle', '◉', 'Idle'], ['listening', '((•))', 'Listening'],
@@ -778,8 +802,6 @@ function renderChat(container) {
     )
   );
 
-  chatState.callLive = true;
-
   function applyState(id) {
     setGlobeState(id);
     document.querySelectorAll('.state-btn').forEach(b => b.classList.toggle('on', b.dataset.state === id));
@@ -791,33 +813,8 @@ function renderChat(container) {
     if (window.NeuralGlobe) window.NeuralGlobe.setState(s);
   }
 
-  /* camera feed modal — real getUserMedia stream */
-  function openCameraModal() {
-    const video = el('video', { autoplay: '', playsinline: '', style: 'width:100%;border-radius:10px;background:#000;max-height:340px;object-fit:cover' });
-    const status = el('div', { class: 'form-hint' }, '◌ Requesting camera access…');
-    let stream = null;
-    const m = openModal({
-      title: 'CAMERA FEED',
-      sub: 'Screen Vision agent • live camera preview',
-      body: el('div', {}, video, status),
-      actions: [
-        el('button', { class: 'btn', onclick: () => { if (stream) stream.getTracks().forEach(tr => tr.stop()); closeModal(); } }, 'CLOSE FEED'),
-        el('button', { class: 'btn primary', onclick: () => {
-          if (!stream) { status.textContent = '◌ No active stream — camera permission dein.'; return; }
-          status.innerHTML = '<span class="form-ok">✓ Snapshot captured → Screen Vision analysis queue (mock).</span>';
-        } }, '◉ CAPTURE SNAPSHOT')
-      ]
-    });
-    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-      navigator.mediaDevices.getUserMedia({ video: true })
-        .then(s => { stream = s; video.srcObject = s; status.innerHTML = '<span class="form-ok">● LIVE — camera feed active</span>'; })
-        .catch(() => { status.innerHTML = '<span class="form-err">✕ Camera access denied/na ho — Windows privacy settings check karein.</span>'; });
-    } else status.innerHTML = '<span class="form-err">✕ Camera API not available.</span>';
-    const obs = new MutationObserver(() => {
-      if (!document.body.contains(video)) { if (stream) stream.getTracks().forEach(tr => tr.stop()); obs.disconnect(); }
-    });
-    obs.observe(document.getElementById('modal-root'), { childList: true, subtree: true });
-  }
+  /* camera feed modal REMOVED (user request: call/camera buttons hata diye —
+     sirf ek mic button rehta hai, koi confusion nahi) */
 
   /* ── RIGHT: transcript + composer ── */
   const scroll = el('div', { class: 'transcript-scroll' });
@@ -866,19 +863,7 @@ function renderChat(container) {
   }
   refreshActiveTags();
 
-  const composerMicBtn = el('button', {
-    class: 'call-btn',
-    style: 'width:38px;height:38px;font-size:14px',
-    title: 'Voice input — click to speak',
-    onclick: () => {
-      if (chatState.recording) {
-        stopRecording();
-      } else {
-        startRecording();
-      }
-    }
-  }, '🎙');
-
+  // Composer mic REMOVED (user request): mic ka sirf EK control — globe ke neeche.
   const versionTag = el('span', {}, 'v1.2.2 — CLOUD VOICE ACTIVE');
   if (window.jarvis?.app?.getVersion) {
     window.jarvis.app.getVersion().then(v => { versionTag.textContent = 'v' + v + ' — CLOUD VOICE ACTIVE'; });
@@ -890,7 +875,7 @@ function renderChat(container) {
         el('span', {}, '◉ TRANSCRIPT'),
         activeModelTag),
       scroll,
-      el('div', { class: 'composer' }, input, composerMicBtn, sendBtn),
+      el('div', { class: 'composer' }, input, sendBtn),
       el('div', { class: 'status-line' }, statusLeft, versionTag)
     )
   );
@@ -899,15 +884,32 @@ function renderChat(container) {
   if (window.NeuralGlobe) window.NeuralGlobe.mount(globeStage);
   renderMsgs(scroll);
 
+  // Module-level live listeners ko CURRENT render ke UI elements do —
+  // ye assignment har render par refresh hoti hai (listeners khud once bind hote hain).
+  __chatUi = { statusLeft, applyState, interruptBtn, scroll, renderMsgs };
+  if (liveActive || chatState.recording) micBtn.classList.add('mic-on');
+  updateVoiceModeBadge();
+
   function pushMsg(m) {
     chatState.messages.push(m);
     renderMsgs(scroll);
-    if (m.role === 'user') jarvisRespond();
+    if (m.role === 'user') {
+      // Live session chal raha ho to typed text bhi USI realtime conversation
+      // mein jata hai (clientContent turn) — Jarvis usi voice mein bol kar jawab
+      // deta hai, dobara Brain/TTS roundtrip nahi hota.
+      if (liveActive && window.jarvis?.voice?.live?.sendText) {
+        window.jarvis.voice.live.sendText(m.text).catch(() => {});
+        return;
+      }
+      jarvisRespond();
+    }
   }
 
   // Speak assistant response through Cloud TTS
   async function speakResponse(text) {
     if (!text || !text.trim()) return;
+    // Live session khud bolta hai — cloud TTS yahan double-speak karta
+    if (liveActive) return;
     const cleanText = text.replace(/<[^>]*>?/gm, '').replace(/[*_#`~]/g, '').trim();
     if (!cleanText) return;
 
@@ -1080,13 +1082,14 @@ function renderChat(container) {
       const isLast = idx === chatState.messages.length - 1;
       const metaRow = el('div', { class: 'meta' });
       if (m.role === 'jarvis') {
-        metaRow.append(
+        // .append(null) DOM mein literal "null" text ban jata hai — filter zaroori
+        metaRow.append(...[
           el('span', { class: 'm-sender' }, '◈ JARVIS AI'),
           el('span', {}, '• ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })),
           m.tag ? el('span', { class: 'm-tag' }, m.tag) : null,
           !isTyping && m.emo ? el('span', { class: 'm-tag' }, (m.emo || 'neutral') + ' • 5.4k tok') : null,
           isTyping ? el('span', { class: 'm-tag' }, 'streaming…') : null
-        );
+        ].filter(Boolean));
       } else {
         metaRow.append(
           el('span', { class: 'm-sender', style: 'color:var(--muted)' }, 'OPERATOR'),
@@ -1959,7 +1962,7 @@ async function renderVoice(container) {
       tts
         ? el('div', { style: 'font-size:10px;color:var(--muted);line-height:1.4' },
             el('div', { style: 'color:#fff;font-weight:600' }, (ttsMeta?.glyph || '♫') + ' ' + (tts.keyName || ttsMeta?.name || 'Voice Engine')),
-            el('div', {}, 'Voice: <b style="color:var(--mint)">' + (tts.voice || 'Default') + '</b> • Model: <span style="font-family:var(--font-mono)">' + (tts.model || 'auto') + '</span>')
+            el('div', { html: 'Voice: <b style="color:var(--mint)">' + (tts.voice || 'Default') + '</b> • Model: <span style="font-family:var(--font-mono)">' + (tts.model || 'auto') + '</span>' })
           )
         : el('div', { style: 'font-size:9.5px;color:#ff8888;line-height:1.4' },
             'Jarvis bolne ke liye active TTS voice key chahiye. Google AI, ElevenLabs, ya OpenAI key add karein.'
@@ -1981,7 +1984,7 @@ async function renderVoice(container) {
       stt
         ? el('div', { style: 'font-size:10px;color:var(--muted);line-height:1.4' },
             el('div', { style: 'color:#fff;font-weight:600' }, (sttMeta?.glyph || '🎙') + ' ' + (stt.keyName || sttMeta?.name || 'Speech-to-Text')),
-            el('div', {}, 'Model: <b style="color:var(--mint);font-family:var(--font-mono)">' + (stt.model || 'Auto-detected') + '</b>' + (stt.isReused ? ' <span style="color:#a8d1ff;font-size:9px">(Reused from ' + (stt.reusedSource || 'Gemini') + ')</span>' : ''))
+            el('div', { html: 'Model: <b style="color:var(--mint);font-family:var(--font-mono)">' + (stt.model || 'Auto-detected') + '</b>' + (stt.isReused ? ' <span style="color:#a8d1ff;font-size:9px">(Reused from ' + (stt.reusedSource || 'Gemini') + ')</span>' : '') })
           )
         : el('div', { style: 'font-size:9.5px;color:#ff8888;line-height:1.4' },
             'Jarvis sunne ke liye active STT key chahiye.'
@@ -2263,7 +2266,7 @@ async function renderVoice(container) {
   const patternWarningBanner = el('div', { class: 'pattern-warn-banner', style: 'display:none' });
 
   // Step 4: Validate Button
-  const validateBtn = el('button', { class: 'btn primary', style: 'min-width:150px' }, '🔍 1. VERIFY VOICE KEY');
+  const validateBtn = el('button', { class: 'btn primary', style: 'min-width:150px' }, '🔍 VERIFY VOICE KEY');
 
   // Step 5 & 6: Live Models & Voices Selection UI
   // Flow: MODELS first (fetched live on validate) → VOICES second (fetched live for the chosen model)
@@ -2312,10 +2315,10 @@ async function renderVoice(container) {
   );
 
   // Step 7: Test Voice Call Button (actually plays real audio)
-  const testVoiceBtn = el('button', { class: 'btn', style: 'min-width:150px;background:#1a231b;border-color:var(--mint);color:var(--mint)' }, '🔊 2. TEST VOICE PLAYBACK');
+  const testVoiceBtn = el('button', { class: 'btn', style: 'min-width:130px;background:#1a231b;border-color:var(--mint);color:var(--mint)' }, '🔊 TEST VOICE');
 
   // Step 8: Save Key Button
-  const saveVoiceKeyBtn = el('button', { class: 'btn primary', style: 'min-width:160px;background:var(--mint);color:#000;display:none' }, '💾 3. SAVE TO VOICE VAULT');
+  const saveVoiceKeyBtn = el('button', { class: 'btn primary', style: 'min-width:150px;background:var(--mint);color:#000;display:none' }, '💾 SAVE TO VAULT');
 
   // Status message container
   const flowStatusMsg = el('div', { class: 'step-result-msg', style: 'display:none' });
@@ -2425,7 +2428,7 @@ async function renderVoice(container) {
     } finally {
       flowState.validating = false;
       validateBtn.disabled = false;
-      validateBtn.textContent = '🔍 1. VERIFY VOICE KEY';
+      validateBtn.textContent = '🔍 VERIFY VOICE KEY';
     }
   };
 
@@ -2627,7 +2630,7 @@ async function renderVoice(container) {
     } finally {
       flowState.testing = false;
       testVoiceBtn.disabled = false;
-      testVoiceBtn.textContent = '🔊 2. TEST VOICE PLAYBACK';
+      testVoiceBtn.textContent = '🔊 TEST VOICE';
     }
   };
 
@@ -2700,7 +2703,7 @@ async function renderVoice(container) {
     } finally {
       flowState.saving = false;
       saveVoiceKeyBtn.disabled = false;
-      saveVoiceKeyBtn.textContent = '💾 3. SAVE TO VOICE VAULT';
+      saveVoiceKeyBtn.textContent = '💾 SAVE TO VAULT';
     }
   };
 
@@ -2731,12 +2734,9 @@ async function renderVoice(container) {
     el('div', { class: 'flow-step-header' },
       el('div', { class: 'panel-title', style: 'font-size:12.5px' },
         el('span', { class: 'pt-ic' }, '+'),
-        'ADD CLOUD VOICE KEY — 9-STEP VERIFIED FLOW (TTS & STT)'
+        'ADD CLOUD VOICE KEY'
       ),
-      el('span', { class: 'badge gray', style: 'font-size:8.5px' }, 'MANDATORY AUDIO TEST BEFORE SAVE')
-    ),
-    el('div', { style: 'font-size:9.5px;color:var(--muted);margin-bottom:12px;line-height:1.5' },
-      'Live validation performs real-time handshake with the provider. Discovered voices and models are fetched dynamically without hardcoding. A mandatory test generates real speech before AES-256-GCM encrypted persistence.'
+      el('span', { class: 'badge gray', style: 'font-size:8.5px' }, 'LIVE-VERIFIED • AUDIO TEST BEFORE SAVE')
     ),
     existingGeminiBar,
     el('div', { class: 'filter-row' },
@@ -2925,7 +2925,7 @@ async function renderVoice(container) {
       return `<div style="color:#ff8888">✕ Live check fail: ${String(q.pingError).slice(0, 160)}</div>`;
     }
     return `<div>◉ Model: <b style="color:var(--mint);font-family:var(--font-mono)">${q.model || 'auto'}</b> — <span style="color:var(--mint)">✓ LIVE OK${q.pingLatencyMs ? ' (' + q.pingLatencyMs + 'ms)' : ''}</span></div>` +
-      `<div style="color:var(--muted)">Quota source: <b style="color:#a8d1ff">LIVE FETCH</b> (real API call — free tier har request live verify hoti hai; paid/billing tier par Google usage dashboard hi exact numbers deta hai).</div>` +
+      `<div style="color:var(--muted)">Free tier: har request live verify hoti hai • Paid tier: exact usage Google AI Studio dashboard mein nazar aata hai.</div>` +
       `<div style="color:var(--muted)">Is session ki local usage: <b style="color:var(--text)">${q.local?.sessionRequests ?? 0}</b> speech requests • last used: ${q.local?.lastUsed ? new Date(q.local.lastUsed).toLocaleTimeString() : 'never'}</div>`;
   }
 

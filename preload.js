@@ -112,6 +112,10 @@ contextBridge.exposeInMainWorld('jarvis', {
     live: {
       start: (options) => ipcRenderer.invoke('voice:live:start', options),
       sendAudio: (pcmChunk) => ipcRenderer.invoke('voice:live:sendAudio', pcmChunk),
+      // ONE-WAY streaming channel: no await, no round-trip. Mic chunks (128ms)
+      // must flow at realtime pace — waiting on IPC results per chunk adds
+      // conversational latency and laggy, delayed live responses.
+      streamAudio: (pcmChunk) => ipcRenderer.send('voice:live:streamAudio', pcmChunk),
       stop: () => ipcRenderer.invoke('voice:live:stop'),
       getStatus: () => ipcRenderer.invoke('voice:live:getStatus'),
       onAudio: (cb) => {
@@ -143,7 +147,9 @@ contextBridge.exposeInMainWorld('jarvis', {
         const listener = (_e, data) => cb(data);
         ipcRenderer.on('voice:live:status', listener);
         return () => ipcRenderer.removeListener('voice:live:status', listener);
-      }
+      },
+      // Typed chat text → running live session as a clientContent turn
+      sendText: (text) => ipcRenderer.invoke('voice:live:sendText', String(text || ''))
     }
   }
 });

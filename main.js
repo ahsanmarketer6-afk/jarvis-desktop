@@ -168,8 +168,23 @@ ipcMain.handle('voice:reuseGeminiKeyForStt', () => voiceManager.reuseGeminiKeyFo
 // Live API BidiGenerateContent IPC Handlers
 ipcMain.handle('voice:live:start', (e, opts) => voiceManager.startLiveSession({ ...(opts || {}), windowSender: e.sender }));
 ipcMain.handle('voice:live:sendAudio', (_e, pcmChunk) => voiceManager.sendLiveAudio(pcmChunk));
+// FIRE-AND-FORGET mic stream: one-way (no invoke round-trip). The old path awaited
+// an IPC result for EVERY 128ms audio chunk — that serialization alone added
+// hundreds of ms of conversational latency and jitter to Live Mode.
+ipcMain.on('voice:live:streamAudio', (_e, pcmChunk) => {
+  try { voiceManager.sendLiveAudio(pcmChunk); } catch (e) { /* never throw into IPC */ }
+});
 ipcMain.handle('voice:live:stop', () => voiceManager.stopLiveSession());
 ipcMain.handle('voice:live:getStatus', () => voiceManager.getLiveStatus());
+// Typed chat text joins the running live session as a user turn (Jarvis replies
+// in the SAME realtime session/voice instead of a separate Brain->TTS roundtrip).
+ipcMain.handle('voice:live:sendText', (_e, text) => {
+  const live = voiceManager.getLiveStatus();
+  if (!live || !live.setupComplete) {
+    return { success: false, error: 'Live session not active' };
+  }
+  return voiceManager.liveSession.sendClientText(String(text || ''));
+});
 
 // ─── Window lifecycle ───────────────────────────────────────────────
 function createWindow() {

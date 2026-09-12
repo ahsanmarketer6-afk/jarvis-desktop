@@ -56,6 +56,7 @@ class GeminiLiveSessionManager extends EventEmitter {
     this.maxRetries = 3;
     this.currentTurnTranscript = '';
     this.windowSender = null;
+    this._preSetupQueue = [];
   }
 
   maskKey(key) {
@@ -79,7 +80,7 @@ class GeminiLiveSessionManager extends EventEmitter {
     this.windowSender = windowSender;
     this.currentTurnTranscript = '';
     this.shortLived = Boolean(shortLived);
-    this.shortLived = Boolean(shortLived);
+    this._preSetupQueue = [];
 
     if (this.ws) {
       await this.stopSession();
@@ -216,6 +217,17 @@ class GeminiLiveSessionManager extends EventEmitter {
             if (data.setupComplete) {
               this.setupComplete = true;
               console.log('[Gemini Live API] ✓ setupComplete received — session is live.');
+
+              // Flush mic audio buffered while setup was completing: the mic starts
+              // capturing BEFORE the websocket handshake finishes, so the user's
+              // first words must be queued (never dropped) and sent in order.
+              const queued = this._preSetupQueue.splice(0, this._preSetupQueue.length);
+              if (queued.length) {
+                console.log(`[Gemini Live API] Flushing ${queued.length} pre-setup mic chunk(s)...`);
+                for (const chunk of queued) {
+                  try { socket.send(JSON.stringify({ realtimeInput: { audio: { data: String(chunk).replace(/^data:[^;]+;base64,/, ''), mimeType: 'audio/pcm;rate=16000' } } })); } catch (e) {}
+                }
+              }
 
               if (!resolved) {
                 resolved = true;
@@ -382,8 +394,11 @@ class GeminiLiveSessionManager extends EventEmitter {
               data: part.inlineData.data
             });
           }
-          // Text Transcript Part (if provided directly)
-          if (part.text) {
+          // Text Transcript Part — SKIP thought summaries (part.thought=true):
+          // the model's internal "Refining..." reasoning must never appear in the
+          // user-visible chat transcript (real bug: transcript looked like Jarvis
+          // was answering something else entirely).
+          if (part.text && !part.thought) {
             this.currentTurnTranscript += part.text;
             this.safeSend('voice:live:text', {
               text: part.text,
@@ -406,6 +421,7 @@ class GeminiLiveSessionManager extends EventEmitter {
       // 2c. Input Audio Transcription (user's spoken words in real time)
       const inputTranscription = data.serverContent?.inputAudioTranscription?.text || data.serverContent?.inputTranscription?.text;
       if (inputTranscription) {
+        this._lastUserUtterance = (this._lastUserUtterance || '') + inputTranscription;
         this.safeSend('voice:live:text', {
           text: inputTranscription,
           isUser: true
@@ -418,6 +434,11 @@ class GeminiLiveSessionManager extends EventEmitter {
           const finalUtterance = this.currentTurnTranscript.trim();
           db.logActivity('Gemini Live', `Jarvis Live Reply: "${finalUtterance.slice(0, 60)}${finalUtterance.length > 60 ? '...' : ''}"`, null, 'success');
           this.currentTurnTranscript = '';
+        }
+        // Log the user's spoken turn too (usage panel counts real live turns)
+        if (this._lastUserUtterance && this._lastUserUtterance.trim()) {
+          db.logActivity('Gemini Live', `User Live Turn: "${this._lastUserUtterance.trim().slice(0, 60)}"`, null, 'success');
+          this._lastUserUtterance = '';
         }
         this.emit('live:turnComplete');
         this.safeSend('voice:live:turnComplete');
@@ -465,7 +486,16 @@ class GeminiLiveSessionManager extends EventEmitter {
       return { success: false, error: 'Live session is not connected' };
     }
     if (!this.setupComplete) {
-      // Buffer-drop is safe: setup usually completes in <1s; audio before setup is rejected by server.
+      // BUFFER, never drop: the mic starts instantly while the WS handshake is
+      // still completing (~1s). Queued chunks flush in order right after
+      // setupComplete, so the user's first words are heard by the model.
+      if (!this.isManualStop && this.sessionConfig) {
+        if (!Array.isArray(this._preSetupQueue)) this._preSetupQueue = [];
+        if (this._preSetupQueue.length < 200) {
+          this._preSetupQueue.push(String(base64Pcm16).replace(/^data:[^;]+;base64,/, ''));
+          return { success: true, buffered: true };
+        }
+      }
       return { success: false, error: 'Live session setup not complete yet' };
     }
 
@@ -495,6 +525,7 @@ class GeminiLiveSessionManager extends EventEmitter {
     this.isManualStop = true;
     this.isOpen = false;
     this.setupComplete = false;
+    this._preSetupQueue = [];
     if (this.ws) {
       try {
         this.ws.close();
