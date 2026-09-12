@@ -554,6 +554,10 @@ function renderChat(container) {
       });
 
       audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+      // Autoplay policy: suspended context par onaudioprocess fire nahi hota
+      if (audioContext.state === 'suspended') {
+        try { await audioContext.resume(); } catch (e) {}
+      }
       const source = audioContext.createMediaStreamSource(stream);
       scriptProcessor = audioContext.createScriptProcessor(2048, 1, 1);
 
@@ -561,14 +565,23 @@ function renderChat(container) {
         if (!liveActive) return;
         const inputData = e.inputBuffer.getChannelData(0);
         const base64Chunk = floatToPcm16Base64(inputData);
+        // QA visibility: renderer-side chunk counter (CDP tests poll this)
+        if (window.__micChunkCount === undefined) window.__micChunkCount = 0;
+        window.__micChunkCount++;
         // ONE-WAY stream channel (no IPC round-trip per 128ms chunk — the old
         // awaited invoke path added huge conversational latency)
         window.jarvis.voice.live.streamAudio(base64Chunk);
       };
 
-      // NO loopback: mic input ko speakers par wapas route karna Jarvis ki apni
-      // awaaz ko model tak pohnchata tha (halo/duplicate-answer bug).
+      // NO loopback — but a ScriptProcessor only FIRE its onaudioprocess when it
+      // reaches the destination, so connect through a ZERO-GAIN node: complete
+      // graph, silence on speakers. (Previous fix dropped destination entirely,
+      // which killed the mic callback completely — "mic se awaaz nahi ja rahi".)
       source.connect(scriptProcessor);
+      const silentSink = audioContext.createGain();
+      silentSink.gain.value = 0;
+      scriptProcessor.connect(silentSink);
+      silentSink.connect(audioContext.destination);
 
       liveActive = true;
       chatState.recording = true;
@@ -655,6 +668,10 @@ function renderChat(container) {
 
       // Capture pure 16kHz mono Float32 PCM samples via AudioContext
       audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+      // Autoplay policy: suspended context par onaudioprocess fire nahi hota
+      if (audioContext.state === 'suspended') {
+        try { await audioContext.resume(); } catch (e) {}
+      }
       const source = audioContext.createMediaStreamSource(stream);
       scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
 
