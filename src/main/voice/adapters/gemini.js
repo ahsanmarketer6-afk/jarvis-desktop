@@ -112,65 +112,22 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
 
     // Models known strictly as WebSocket Live/Bidi only do NOT support REST audio input
     const lower = cleanModel.toLowerCase();
-    if (lower.includes('native-audio') || lower.includes('bidi-only') || lower.includes('realtime')) {
-      this.audioInputCapabilityCache.set(cacheKey, { capable: false, testedAt: Date.now() });
-      return false;
-    }
 
-    const testWavBase64 = this.getSilentWavBase64();
-    const url = `${this.baseUrl}/models/${cleanModel}:generateContent?key=${encodeURIComponent(cleanKey)}`;
-    const payload = {
-      contents: [{
-        role: 'user',
-        parts: [
-          { text: 'test probe' },
-          { inlineData: { mimeType: 'audio/wav', data: testWavBase64 } }
-        ]
-      }]
-    };
-
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 4000);
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: controller.signal
-      });
-      clearTimeout(timeoutId);
-
-      if (res.ok) {
-        this.audioInputCapabilityCache.set(cacheKey, { capable: true, testedAt: Date.now() });
-        return true;
-      }
-
-      const errText = await res.text().catch(() => '');
-      if (errText.includes('Audio input modality is not enabled') ||
-          errText.includes('modality is not enabled') ||
-          errText.includes('does not support audio input') ||
-          errText.includes('INVALID_ARGUMENT') ||
-          errText.includes('is no longer available') ||
-          errText.includes('not found')) {
-        console.log(`[Gemini Voice Adapter] Probe: Model "${cleanModel}" does NOT support audio input modality.`);
-        this.audioInputCapabilityCache.set(cacheKey, { capable: false, testedAt: Date.now() });
-        return false;
-      }
-
-      if (res.status === 429) {
-        // Quota exhausted (or free-tier limit: 0 for this model) — capability is
-        // UNVERIFIABLE right now. Never report "capable" from a 429 and never cache
-        // it: a stale true here sent STT traffic to image models (limit 0 → 429 loop).
-        console.warn(`[Gemini Voice Adapter] Probe: "${cleanModel}" is quota-limited (429) — treating as NOT audio-input capable (not cached).`);
-        return false;
-      }
-
-      this.audioInputCapabilityCache.set(cacheKey, { capable: false, testedAt: Date.now() });
-      return false;
-    } catch (e) {
-      console.warn(`[Gemini Voice Adapter] Probe request error for "${cleanModel}":`, e.message);
-      return false;
-    }
+    // Deterministic, zero-latency audio-input classification. The old network probe
+    // here added ~4-11s to EVERY transcription call and its results were ambiguous:
+    // image-generation models have ZERO free-tier speech quota and answer every probe
+    // with 429 (limit: 0), which once got cached as "capable" and sent STT traffic
+    // into a permanent 429 loop. Name classification is deterministic and covers
+    // every real Gemini family:
+    const NOT_AUDIO_INPUT = [
+      'native-audio', 'bidi-only', 'realtime',       // Live/WebSocket-only dialog models
+      'image', 'imagen', 'nano-banana',              // image generation (speech quota = 0)
+      'tts',                                          // text→speech OUTPUT only, no audio input
+      'embedding', 'aqa', 'veo', 'lyria'             // non-audio-input specialties
+    ];
+    const capable = !NOT_AUDIO_INPUT.some(p => lower.includes(p));
+    this.audioInputCapabilityCache.set(cacheKey, { capable, testedAt: Date.now() });
+    return capable;
   }
 
   async validateKey(key) {
@@ -954,7 +911,7 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
     });
   }
 
-  async synthesize(key, voice = 'Puck', text, options = {}) {
+  async synthesize(key, voice = 'Puck', text, options = {}, _retryModelIds = false) {
     const t0 = Date.now();
     const cleanKey = String(key).trim();
     let model = options.model;
@@ -966,6 +923,50 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
       model = models[0].id;
     }
     model = this.sanitizeModel(model);
+
+    try {
+      const result = await this.synthesizeViaRest(cleanKey, voice, text, model, t0);
+      return result;
+    } catch (err) {
+      const msg = String(err && err.message || '');
+      // Per-model daily/per-minute buckets: one TTS model out of quota should NOT
+      // kill speech when another dedicated TTS model still has quota left.
+      if (/rate limit|429/i.test(msg) && !_retryModelIds) {
+        const ttsModels = await this.fetchModels(cleanKey, { category: 'tts' }).catch(() => []);
+        // Google aliases "preview" models to canonical ids (flash-preview-tts -> flash-tts),
+        // so mark BOTH the requested alias and its canonical form as already-tried.
+        const tried = new Set([model, model.replace(/-preview-/g, '-').replace(/-latest$/, '')]);
+        const next = (ttsModels || []).map(m => m.id).find(id => {
+          const c = id.toLowerCase();
+          return !tried.has(id) && c.includes('tts') && !c.includes('pro'); // pro = paid tier
+        });
+        if (next) {
+          console.log(`[Gemini Voice Adapter] TTS model "${model}" rate-limited — retrying with "${next}"`);
+          return await this.synthesize(key, voice, text, { ...options, model: next }, true);
+        }
+      }
+      throw err;
+    }
+  }
+
+  async synthesizeViaRest(cleanKey, voice, text, model, t0) {
+
+    // Live/native-audio models ONLY speak over the WebSocket (bidiGenerateContent);
+    // REST generateContent synthesis on them always 400s ("only supports real-time
+    // bidirectional streaming via WebSocket"). Auto-fallback to the best REST TTS
+    // model so Jarvis never goes silent just because a Live model was saved in the vault.
+    if (this.isLiveModel(model)) {
+      const ttsModels = await this.fetchModels(cleanKey, { category: 'tts' }).catch(() => []);
+      const restTts = (ttsModels || []).find(m => m.isDedicatedTts) || (ttsModels || []).find(m => !this.isLiveModel(m.id));
+      if (!restTts) {
+        throw new Error(
+          `Model "${model}" is a Live-API (WebSocket) model — it cannot synthesize speech via REST, ` +
+          `and no dedicated TTS model is available for this key. Use Live Mode for conversation, or add a TTS-capable key.`
+        );
+      }
+      console.log(`[Gemini Voice Adapter] Vault model "${model}" is Live-only — REST TTS auto-switched to "${restTts.id}"`);
+      model = restTts.id;
+    }
 
     const url = `${this.baseUrl}/models/${model}:generateContent?key=${encodeURIComponent(cleanKey)}`;
     const payload = {
@@ -998,7 +999,24 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
     if (!res.ok) {
       const err = await this.parseError(res, { url, model });
       const errText = `${err.message}`.toLowerCase();
-      if (res.status === 429 || errText.includes('billing') || errText.includes('paid') || errText.includes('permission')) {
+      if (res.status === 429) {
+        // Distinguish REAL paid-tier-only models (free quota limit: 0) from ordinary
+        // per-minute rate limits (e.g. flash-tts free tier = 10 requests/min).
+        // NOTE: Google's generic 429 text always contains "check your plan and billing
+        // details" — so the word "billing" must NOT classify a 429 as paid-tier.
+        const limitZero = /limit:\s*0\b/.test(err.message) || /quotaValue"?:\s*"0"/.test(err.message);
+        if (limitZero) {
+          throw new Error(this.buildPaidTierError(model, err.message));
+        }
+        const retryMatch = err.message.match(/retry in ([\d.]+)s/i);
+        const retryS = retryMatch ? Math.ceil(parseFloat(retryMatch[1])) : null;
+        throw new Error(
+          `TTS rate limit hit on "${model}" (free tier per-minute quota). ` +
+          (retryS ? `~${retryS}s mein dobara try karein. ` : 'Thodi der baad dobara try karein. ') +
+          `Agar baar baar aaye to billing add karein ya doosra TTS model chunein.`
+        );
+      }
+      if (errText.includes('billing') || errText.includes('paid') || errText.includes('permission')) {
         throw new Error(this.buildPaidTierError(model, err.message));
       }
       if (errText.includes('multi-modal output') || errText.includes('response modalities') || errText.includes('modalities are not supported')) {

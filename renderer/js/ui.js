@@ -28,6 +28,56 @@ function toast(msg, isErr = false) {
   setTimeout(() => t.remove(), 3400);
 }
 
+/* ─── Universal TTS playback (Web Audio FIRST, HTMLAudio fallback) ───
+   On some Windows machines the HTMLAudioElement media pipeline fails to load
+   ANY source (NotSupportedError even on perfectly valid WAV data URLs) while
+   the Web Audio graph decodes and plays the exact same bytes fine. Jarvis must
+   speak everywhere, so playback tries Web Audio first and only falls back to
+   the Audio element. Verified by in-app QA: WebAudio peak RMS 0.37 vs Audio
+   element NotSupportedError on the same machine. */
+let __ttsAudioCtx = null;
+let currentTtsSource = null;
+function getTtsAudioCtx() {
+  if (!__ttsAudioCtx || __ttsAudioCtx.state === 'closed') {
+    __ttsAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (__ttsAudioCtx.state === 'suspended') __ttsAudioCtx.resume().catch(() => {});
+  return __ttsAudioCtx;
+}
+async function playTtsBase64(audioBase64, mimeType = 'audio/wav', opts = {}) {
+  if (!audioBase64) throw new Error('No audio data to play');
+  const bin = atob(audioBase64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+
+  // Route 1: Web Audio (works even when HTMLAudio media pipeline is broken)
+  try {
+    const ctx = getTtsAudioCtx();
+    const buf = await ctx.decodeAudioData(bytes.buffer.slice(0));
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    const gain = ctx.createGain();
+    gain.gain.value = opts.volume == null ? 1 : opts.volume;
+    src.playbackRate.value = opts.speed || 1;
+    src.connect(gain);
+    gain.connect(ctx.destination);
+    src.onended = () => { if (currentTtsSource === src) currentTtsSource = null; };
+    currentTtsSource = src;
+    src.start();
+    return { via: 'webaudio', duration: buf.duration / (opts.speed || 1) };
+  } catch (e) {
+    console.warn('[TTS Playback] Web Audio route failed:', e.message);
+  }
+
+  // Route 2: HTMLAudio element (legacy path)
+  const audio = new Audio('data:' + mimeType + ';base64,' + audioBase64);
+  audio.volume = opts.volume == null ? 1 : opts.volume;
+  audio.playbackRate = opts.speed || 1;
+  currentAudioPlayer = audio;
+  await audio.play();
+  return { via: 'audio-element', duration: audio.duration || 0 };
+}
+
 /* ─── Modal system ─────────────────────────────────────────────── */
 function openModal({ title, sub, body, actions }) {
   const root = document.getElementById('modal-root');
@@ -205,6 +255,10 @@ function renderChat(container) {
   }
 
   function stopSpeaking() {
+    if (currentTtsSource) {
+      try { currentTtsSource.stop(); } catch (e) {}
+      currentTtsSource = null;
+    }
     if (currentAudioPlayer) {
       try {
         currentAudioPlayer.pause();
@@ -800,19 +854,27 @@ function renderChat(container) {
           speed: voiceSettings.ttsSpeed,
           volume: voiceSettings.ttsVolume
         });
-
         if (ttsRes && ttsRes.audioBase64) {
           stopSpeaking();
           applyState('speaking');
           statusLeft.textContent = 'Jarvis is speaking (Cloud TTS)…';
           interruptBtn.style.display = 'inline-block';
 
-          const audio = new Audio('data:' + (ttsRes.mimeType || 'audio/mpeg') + ';base64,' + ttsRes.audioBase64);
-          audio.playbackRate = voiceSettings.ttsSpeed || 1.0;
-          audio.volume = (voiceSettings.ttsVolume || 100) / 100;
-          currentAudioPlayer = audio;
+          // Web Audio FIRST (HTMLAudio media pipeline is broken on some machines),
+          // Audio element only as fallback route.
+          let played = null;
+          try {
+            played = await playTtsBase64(ttsRes.audioBase64, ttsRes.mimeType || 'audio/wav', {
+              volume: (voiceSettings.ttsVolume || 100) / 100,
+              speed: voiceSettings.ttsSpeed || 1.0
+            });
+            console.log('[TTS Playback] Playing via', played.via);
+          } catch (playErr) {
+            console.error('[TTS Playback] Both playback routes failed:', playErr.message);
+          }
 
-          audio.onended = () => {
+          // State management: end speaking state when audio actually ends.
+          const finishSpeaking = () => {
             currentAudioPlayer = null;
             interruptBtn.style.display = 'none';
             if (chatState.state === 'speaking') {
@@ -821,18 +883,37 @@ function renderChat(container) {
             }
           };
 
-          audio.onerror = (e) => {
-            console.warn('Audio playback error:', e);
-            currentAudioPlayer = null;
-            interruptBtn.style.display = 'none';
-            if (chatState.state === 'speaking') applyState('idle');
-          };
-
-          await audio.play();
+          if (currentAudioPlayer) {
+            currentAudioPlayer.onended = finishSpeaking;
+            currentAudioPlayer.onerror = () => { finishSpeaking(); };
+          } else {
+            // Web Audio route: no HTMLAudio events — hold speaking state for the clip duration.
+            const holdMs = Math.max(1200, ((played && played.duration) || 3) * 1000 + 400);
+            setTimeout(finishSpeaking, holdMs);
+          }
         }
       }
     } catch (err) {
-      console.warn('Speech synthesis skipped/fallback:', err.message);
+      // NEVER swallow TTS failures silently — Jarvis must not go mute without a trace.
+      console.error('[TTS Playback] Cloud TTS failed, falling back to system voice:', err.message);
+      toast('⚠ Cloud TTS fail: ' + String(err.message).slice(0, 90) + ' — system voice use ho rahi hai', true);
+      try {
+        if ('speechSynthesis' in window) {
+          window.speechSynthesis.cancel();
+          const utt = new SpeechSynthesisUtterance(cleanText);
+          utt.rate = 1.0;
+          window.speechSynthesis.speak(utt);
+          applyState('speaking');
+          statusLeft.textContent = 'Jarvis is speaking (system fallback voice)…';
+          interruptBtn.style.display = 'inline-block';
+          utt.onend = () => {
+            interruptBtn.style.display = 'none';
+            if (chatState.state === 'speaking') applyState('idle');
+          };
+        }
+      } catch (fb) {
+        console.warn('[TTS Playback] System fallback also failed:', fb.message);
+      }
       interruptBtn.style.display = 'none';
     }
   }
@@ -2428,8 +2509,32 @@ async function renderVoice(container) {
 
       if (res && res.success) {
         if (res.audioBase64) {
-          const audio = new Audio('data:' + (res.mimeType || 'audio/mpeg') + ';base64,' + res.audioBase64);
-          audio.play().catch(e => console.warn('Test audio play error:', e));
+          // REAL AUDIBLE TEST: Web Audio first (works everywhere), Audio element fallback.
+          // Test only "passes" if audio actually starts playing audibly.
+          try {
+            const played = await playTtsBase64(res.audioBase64, res.mimeType || 'audio/wav', { volume: 1.0 });
+            await new Promise(rs => setTimeout(rs, 900));
+            if (played.via === 'webaudio' && currentTtsSource) {
+              try { currentTtsSource.stop(); } catch (e) {}
+              currentTtsSource = null;
+            } else if (currentAudioPlayer) {
+              try { currentAudioPlayer.pause(); } catch (e) {}
+              currentAudioPlayer = null;
+            }
+          } catch (playErr) {
+            console.error('Test audio play error:', playErr);
+            flowState.tested = false;
+            saveVoiceKeyBtn.style.display = 'none';
+            setStatus('✕ Audio generate hua lekin PLAY nahi ho saka: ' + playErr.message, 'err');
+            toast('Audio playback failed: ' + playErr.message, true);
+            return;
+          }
+        } else {
+          // "Success" without any audio payload is NOT a passing test
+          flowState.tested = false;
+          saveVoiceKeyBtn.style.display = 'none';
+          setStatus('✕ Test ne audio return nahi ki (success bina audio = fail). Doosra model/voice chunein.', 'err');
+          return;
         }
         flowState.tested = true;
         saveVoiceKeyBtn.style.display = 'inline-flex';
@@ -2464,7 +2569,7 @@ async function renderVoice(container) {
     setStatus('<span class="spin">◌</span> Encrypting voice key with AES-256-GCM and saving into SQLite vault…', 'spin');
 
     const meta = getVoiceProviderMeta(flowState.provider);
-    const keyLabel = (keyLabelInput.value.trim()) || `${meta.name} Voice Key ${currentKeys.length + 1}`;
+    const keyLabel = (keyLabelInput.value.trim()) || `${meta.name} Voice Key ${(Number(currentKeys && currentKeys.length) || 0) + 1}`;
 
     try {
       await window.jarvis.voice.saveKey({
