@@ -139,6 +139,8 @@ ipcMain.handle('voice:fetchVoices', (_e, provider, key, customEndpoint, forceRef
 ipcMain.handle('voice:fetchModels', (_e, provider, key, customEndpoint, forceRefresh, category) => voiceManager.fetchModels(provider, key, customEndpoint, forceRefresh, category));
 ipcMain.handle('voice:testVoice', (_e, provider, key, voice, model, customEndpoint) => voiceManager.testVoice(provider, key, voice, model, customEndpoint));
 ipcMain.handle('voice:saveKey', (_e, payload) => voiceManager.saveKey(payload));
+ipcMain.handle('voice:updateKeyModelVoice', (_e, payload) => voiceManager.updateKeyModelVoice(payload));
+ipcMain.handle('voice:getModelQuota', (_e, provider, key, model, forceRefresh) => voiceManager.getModelQuota(provider, key, model, forceRefresh));
 ipcMain.handle('voice:getKeys', () => voiceManager.getKeys());
 ipcMain.handle('voice:reorderKeys', (_e, ids) => voiceManager.reorderKeys(ids));
 ipcMain.handle('voice:deleteKey', (_e, id) => voiceManager.deleteKey(id));
@@ -146,6 +148,21 @@ ipcMain.handle('voice:setActiveKey', (_e, id) => voiceManager.setActiveKey(id));
 ipcMain.handle('voice:getActiveConfig', () => voiceManager.getActiveConfig());
 ipcMain.handle('voice:synthesize', (_e, text, options) => voiceManager.synthesize(text, options));
 ipcMain.handle('voice:transcribe', (_e, audioData, options) => voiceManager.transcribe(audioData, options));
+ipcMain.handle('voice:getUsage', () => {
+  const db = require('./src/main/database');
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const rows = db.getActivity({ limit: 400 }).filter(r =>
+    /Voice API|Gemini Live/.test(r.agent_name || '') && String(r.created_at || '') >= since.slice(0, 19).replace('T', ' '));
+  const usage = { ttsRequests: 0, ttsChars: 0, sttRequests: 0, liveTurns: 0, liveMinutes: 0 };
+  for (const r of rows) {
+    const txt = `${r.action || ''} ${r.details || ''}`;
+    const charMatch = txt.match(/\((\d+) chars\)/);
+    if (/TTS Synthesized/.test(txt)) { usage.ttsRequests++; usage.ttsChars += charMatch ? parseInt(charMatch[1], 10) : 0; }
+    else if (/STT Transcribed/.test(txt)) usage.sttRequests++;
+    else if (/Live Reply|Live Voice Session/.test(txt)) usage.liveTurns++;
+  }
+  return { window: '24h', ...usage, events: rows.slice(0, 60).map(r => ({ at: r.created_at, agent: r.agent_name, action: r.action, status: r.status })) };
+});
 ipcMain.handle('voice:reuseGeminiKeyForStt', () => voiceManager.reuseGeminiKeyForStt());
 
 // Live API BidiGenerateContent IPC Handlers

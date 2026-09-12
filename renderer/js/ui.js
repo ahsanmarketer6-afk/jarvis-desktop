@@ -207,6 +207,52 @@ function renderChat(container) {
   let liveNextPlayTime = 0;
   let activeLiveSources = [];
 
+  // ─── AUTO-SEND (Standard/TTS mode) + instant-mic helpers ───
+  // Standard mode: jab user ki baat complete ho jaye (speech detected → ~1.6s continuous
+  // silence) to recording khud stop + send ho jati hai — manual send click ki zaroorat nahi.
+  let silenceMonitor = null;
+  let analyserNode = null;
+  let analyserStream = null;
+  const SILENCE_RUNS_MS = 1600;
+  const SILENCE_THRESHOLD = 0.012;
+
+  function clearSilenceMonitor() {
+    if (silenceMonitor) { clearInterval(silenceMonitor); silenceMonitor = null; }
+    analyserNode = null;
+    analyserStream = null;
+  }
+
+  function attachSilenceAutoSend(audioCtx, stream, onAutoStop) {
+    try {
+      analyserStream = stream;
+      const src = audioCtx.createMediaStreamSource(stream);
+      analyserNode = audioCtx.createAnalyser();
+      analyserNode.fftSize = 512;
+      src.connect(analyserNode);
+      const buf = new Float32Array(analyserNode.fftSize);
+      let speechDetected = false;
+      let silenceSince = null;
+      silenceMonitor = setInterval(() => {
+        if (!analyserNode || !chatState.recording) { clearSilenceMonitor(); return; }
+        analyserNode.getFloatTimeDomainData(buf);
+        let peak = 0;
+        for (let i = 0; i < buf.length; i++) { const a = Math.abs(buf[i]); if (a > peak) peak = a; }
+        if (peak >= SILENCE_THRESHOLD) {
+          speechDetected = true;
+          silenceSince = null;
+        } else if (speechDetected) {
+          if (!silenceSince) silenceSince = Date.now();
+          else if (Date.now() - silenceSince >= SILENCE_RUNS_MS) {
+            clearSilenceMonitor();
+            try { onAutoStop(); } catch (e) { console.warn('[AutoSend] callback error:', e); }
+          }
+        }
+      }, 200);
+    } catch (e) {
+      console.warn('[AutoSend] silence monitor failed:', e);
+    }
+  }
+
   // Helper: Converts Float32Array PCM samples to 16-bit PCM RIFF/WAVE ArrayBuffer
   function encodeWAV(samples, sampleRate = 16000) {
     const buffer = new ArrayBuffer(44 + samples.length * 2);
@@ -484,9 +530,13 @@ function renderChat(container) {
       liveActive = true;
       chatState.recording = true;
       micBtn.classList.add('mic-on');
+      // Call button bhi live session ko follow karta hai (visible session indicator)
+      chatState.callLive = true;
+      callBtn.classList.add('call-active');
+      callBtn.innerHTML = '✕';
       applyState('listening');
-      statusLeft.textContent = 'Live voice active — bolo Boss (continuous)';
-      toast('⚡ Gemini Live Mode active — boliye!');
+      statusLeft.textContent = '⚡ Live voice active — bolte raho (mic ON jab tak khud band na karein)';
+      toast('⚡ Gemini Live Mode active — realtime conversation shuru! (mic ON rehta hai)');
     } catch (err) {
       console.error('[Live Mode] Start error:', err);
       toast('Live Mode error: ' + err.message, true);
@@ -500,6 +550,9 @@ function renderChat(container) {
     liveActive = false;
     chatState.recording = false;
     micBtn.classList.remove('mic-on');
+    chatState.callLive = false;
+    callBtn.classList.remove('call-active');
+    callBtn.innerHTML = '✆';
     stopSpeaking();
 
     if (scriptProcessor) {
@@ -565,6 +618,14 @@ function renderChat(container) {
       source.connect(scriptProcessor);
       scriptProcessor.connect(audioContext.destination);
 
+      // AUTO-SEND: speech → ~1.6s silence = khud stop + auto send (TTS mode instant flow)
+      attachSilenceAutoSend(audioContext, stream, () => {
+        if (chatState.recording && voiceMode === 'standard') {
+          statusLeft.textContent = 'Baat complete — auto-sending…';
+          stopRecording();
+        }
+      });
+
       activeMediaRecorder = {
         stop: async () => {
           stream.getTracks().forEach(t => t.stop());
@@ -627,10 +688,13 @@ function renderChat(container) {
       };
 
       chatState.recording = true;
+      chatState.callLive = true;
       micBtn.classList.add('mic-on');
+      callBtn.classList.add('call-active');
+      callBtn.innerHTML = '✕';
       applyState('listening');
-      statusLeft.textContent = 'Listening to your voice… (speak now)';
-      toast('🎙 Microphone listening — boliye Boss');
+      statusLeft.textContent = '🎙 Listening… (baat khatam hote hi AUTO-SEND ho jayegi)';
+      toast('🎙 Mic instantly ON — boliye, baat khatam hote hi khud send ho jayegi');
     } catch (err) {
       console.error('Microphone access failed:', err);
       toast('Microphone error: ' + err.message, true);
@@ -640,6 +704,7 @@ function renderChat(container) {
   }
 
   function stopRecording() {
+    clearSilenceMonitor();
     if (voiceMode === 'live') {
       return stopLiveMode();
     }
@@ -650,6 +715,10 @@ function renderChat(container) {
     }
     chatState.recording = false;
     micBtn.classList.remove('mic-on');
+    // Mic band = session indicator bhi reset (dono buttons sync)
+    chatState.callLive = false;
+    callBtn.classList.remove('call-active');
+    callBtn.innerHTML = '✆';
   }
 
   const micBtn = el('button', {
@@ -669,18 +738,18 @@ function renderChat(container) {
     openCameraModal();
   } }, '📷');
 
-  const callBtn = el('button', { class: 'call-btn call-active', id: 'call-master', title: 'Voice session — live with Jarvis (click to toggle)', onclick: () => {
-    chatState.callLive = !chatState.callLive;
+  // CALL BUTTON = MIC BUTTON (instant). Pehle pehle call daba kar phir mic dabana
+  // parta tha — woh ritual khatam. Dono buttons seedha mic start/stop karte hain.
+  const callBtn = el('button', { class: 'call-btn call-active', id: 'call-master', title: 'Voice — INSTANT mic on/off (mic button jaisa)', onclick: () => {
+    if (chatState.recording) {
+      stopRecording();
+      applyState('idle');
+      statusLeft.textContent = 'Voice session ended';
+    } else {
+      startRecording();
+    }
     callBtn.classList.toggle('call-active', chatState.callLive);
     callBtn.innerHTML = chatState.callLive ? '✕' : '✆';
-    if (chatState.callLive) {
-      toast('✆ Voice session live — press mic to talk');
-    } else {
-      stopSpeaking();
-      if (chatState.recording) stopRecording();
-      applyState('idle');
-      toast('Voice session ended');
-    }
   } }, '✕');
 
   const center = el('div', { class: 'globe-center' },
@@ -2012,11 +2081,17 @@ async function renderVoice(container) {
               model: k.selected_model
             });
             if (res && res.audioBase64) {
-              const audio = new Audio('data:' + (res.mimeType || 'audio/mpeg') + ';base64,' + res.audioBase64);
-              audio.play().catch(e => console.warn('Audio play error:', e));
-              toast('✓ Audio test played successfully (' + (res.latencyMs || 0) + 'ms)');
+              try {
+                const played = await playTtsBase64(res.audioBase64, res.mimeType || 'audio/wav', { volume: 1.0 });
+                await new Promise(rs => setTimeout(rs, 900));
+                if (played.via === 'webaudio' && currentTtsSource) { try { currentTtsSource.stop(); } catch (e) {} currentTtsSource = null; }
+                else if (currentAudioPlayer) { try { currentAudioPlayer.pause(); } catch (e) {} currentAudioPlayer = null; }
+                toast('✓ Audio test played successfully (' + (res.latencyMs || 0) + 'ms)');
+              } catch (playErr) {
+                toast('✕ Audio generate hua lekin play nahi hua: ' + playErr.message, true);
+              }
             } else {
-              toast('✓ Voice test signal verified (' + (res.latencyMs || 0) + 'ms)');
+              toast('✕ Test failed: audio payload nahi mila', true);
             }
           } catch (err) {
             toast('✕ Voice test failed: ' + err.message, true);
@@ -2621,9 +2696,7 @@ async function renderVoice(container) {
       updateVoiceKeysUI();
       updateVoiceChainUI();
       await updateDualEngineStatus();
-    } catch (err) {
-      setStatus('✕ Save failed: ' + err.message, 'err');
-      toast('Save failed: ' + err.message, true);
+      await maybeShowSavedKeyEditor();
     } finally {
       flowState.saving = false;
       saveVoiceKeyBtn.disabled = false;
@@ -2828,6 +2901,158 @@ async function renderVoice(container) {
   // Check Gemini on mount
   checkExistingGeminiKey();
 
+  // ═══════════════════════════════════════════════════════════
+  // SAVED KEY — CHANGE VOICE/MODEL ANYTIME (dropdown kabhi ghayab nahi hota)
+  // + REAL QUOTA / USAGE (live fetch — koi fake number nahi)
+  // ═══════════════════════════════════════════════════════════
+  const savedKeyPanel = el('div', { style: 'display:none;margin-top:14px;padding:12px;background:rgba(77,166,255,0.05);border:1px solid rgba(77,166,255,0.25);border-radius:10px' });
+  let savedKeyModels = [];
+  let savedKeyVoices = [];
+  let quotaAutoTimer = null;
+
+  const skModelSelect = el('select', { class: 'select', style: 'flex:1;min-width:220px' });
+  const skVoiceSelect = el('select', { class: 'select', style: 'flex:1;min-width:220px' });
+  const skStatus = el('span', { style: 'font-size:9.5px;color:var(--muted)' }, '');
+  const quotaCard = el('div', { style: 'display:none;margin-top:10px;padding:10px 12px;background:#0d110d;border:1px solid var(--line2);border-radius:8px;font-size:10px;line-height:1.55' });
+
+  function fmtQuota(q) {
+    if (!q) return '';
+    if (q.isPaidTierOnly) {
+      return `<div style="color:#ffb84d;font-weight:700">💳 "${q.model || '?'}" PAID-TIER model hai — free tier isay provide hi nahi karta.</div>` +
+        `<div style="color:var(--muted)">Provider: <b style="color:#a8d1ff">${q.provider}</b> → <a href="https://aistudio.google.com/apikey" style="color:#4da6ff">Google AI Studio</a> par ja kar billing add karein, phir yeh model use ho jayega aur usage yahan live nazar aayegi. Ya free-tier model chunein.</div>`;
+    }
+    if (!q.pingOk && q.pingError) {
+      return `<div style="color:#ff8888">✕ Live check fail: ${String(q.pingError).slice(0, 160)}</div>`;
+    }
+    return `<div>◉ Model: <b style="color:var(--mint);font-family:var(--font-mono)">${q.model || 'auto'}</b> — <span style="color:var(--mint)">✓ LIVE OK${q.pingLatencyMs ? ' (' + q.pingLatencyMs + 'ms)' : ''}</span></div>` +
+      `<div style="color:var(--muted)">Quota source: <b style="color:#a8d1ff">LIVE FETCH</b> (real API call — free tier har request live verify hoti hai; paid/billing tier par Google usage dashboard hi exact numbers deta hai).</div>` +
+      `<div style="color:var(--muted)">Is session ki local usage: <b style="color:var(--text)">${q.local?.sessionRequests ?? 0}</b> speech requests • last used: ${q.local?.lastUsed ? new Date(q.local.lastUsed).toLocaleTimeString() : 'never'}</div>`;
+  }
+
+  async function refreshQuotaCard(model, force) {
+    const keyRow = currentKeys.find(k => k.is_active && k.provider === 'gemini') || currentKeys.find(k => k.provider === 'gemini');
+    if (!keyRow || !model) { quotaCard.style.display = 'none'; return; }
+    try {
+      const q = await window.jarvis.voice.getModelQuota('gemini', keyRow.raw_key, model, !!force);
+      quotaCard.innerHTML = fmtQuota(q);
+      quotaCard.style.display = 'block';
+    } catch (e) {
+      quotaCard.innerHTML = `<div style="color:#ff8888">✕ Quota fetch failed: ${String(e.message).slice(0, 120)}</div>`;
+      quotaCard.style.display = 'block';
+    }
+  }
+
+  async function openSavedKeyEditor(keyRow) {
+    savedKeyPanel.style.display = 'block';
+    savedKeyPanel.innerHTML = '';
+    skStatus.textContent = '';
+    savedKeyPanel.append(
+      el('div', { style: 'display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:8px' },
+        el('div', { style: 'font-size:11px;font-weight:700;color:#a8d1ff' }, '♫ CHANGE VOICE / MODEL — "' + (keyRow.key_name || 'saved key') + '"'),
+        el('button', { class: 'btn', style: 'font-size:9px;padding:3px 10px', onclick: () => { savedKeyPanel.style.display = 'none'; if (quotaAutoTimer) { clearInterval(quotaAutoTimer); quotaAutoTimer = null; } } }, '✕ CLOSE')
+      ),
+      el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap;align-items:center' }, skModelSelect, skVoiceSelect),
+      el('div', { style: 'margin-top:6px' }, skStatus),
+      quotaCard,
+      skApplyBtn
+    );
+
+    skVoiceSelect.innerHTML = '';
+    skVoiceSelect.appendChild(el('option', { value: '' }, '◌ Loading live voices…'));
+    skModelSelect.innerHTML = '';
+    skModelSelect.appendChild(el('option', { value: '' }, '◌ Loading live models…'));
+
+    const key = keyRow.raw_key;
+    try {
+      const mRes = await window.jarvis.voice.fetchModels('gemini', key, keyRow.custom_endpoint, false, 'tts');
+      savedKeyModels = mRes?.models || [];
+      skModelSelect.innerHTML = '';
+      savedKeyModels.forEach(m => {
+        const cat = m.modalitySupport && m.modalitySupport.length ? ' [' + m.modalitySupport.join(' · ') + ']' : '';
+        skModelSelect.appendChild(el('option', { value: m.id }, (m.isLiveCapable ? '⚡ ' : '✦ ') + (m.name || m.id) + cat));
+      });
+      const keepM = savedKeyModels.find(m => m.id === keyRow.selected_model);
+      skModelSelect.value = keepM ? keyRow.selected_model : (savedKeyModels[0] ? savedKeyModels[0].id : '');
+    } catch (e) {
+      skModelSelect.innerHTML = '';
+      skModelSelect.appendChild(el('option', { value: keyRow.selected_model || '' }, keyRow.selected_model || '✕ Model fetch failed'));
+    }
+
+    await loadSavedVoices(keyRow, skModelSelect.value);
+
+    if (quotaAutoTimer) clearInterval(quotaAutoTimer);
+    quotaAutoTimer = setInterval(() => {
+      if (savedKeyPanel.style.display === 'none') { clearInterval(quotaAutoTimer); quotaAutoTimer = null; return; }
+      refreshQuotaCard(skModelSelect.value, false);
+    }, 60 * 1000);
+    refreshQuotaCard(skModelSelect.value, false);
+  }
+
+  async function loadSavedVoices(keyRow, model) {
+    const key = keyRow.raw_key;
+    skVoiceSelect.innerHTML = '';
+    skVoiceSelect.appendChild(el('option', { value: '' }, '◌ Loading live voices for ' + (model || 'model') + '…'));
+    try {
+      const vRes = await window.jarvis.voice.fetchVoices('gemini', key, keyRow.custom_endpoint, true, model);
+      savedKeyVoices = vRes?.voices || [];
+      skVoiceSelect.innerHTML = '';
+      savedKeyVoices.forEach(v => {
+        const gender = (v.gender || 'neutral').toLowerCase();
+        const gIcon = gender === 'male' ? '♂' : gender === 'female' ? '♀' : '⚪';
+        const langs = Array.isArray(v.langs) && v.langs.length ? v.langs.join('/') : '';
+        skVoiceSelect.appendChild(el('option', { value: v.id }, `♫ ${v.name || v.id} — ${gIcon} ${gender}${langs ? ' · 🌐 ' + langs : ''}`));
+      });
+      const keepV = savedKeyVoices.find(v => v.id === keyRow.selected_voice);
+      skVoiceSelect.value = keepV ? keyRow.selected_voice : (savedKeyVoices[0] ? savedKeyVoices[0].id : '');
+    } catch (e) {
+      skVoiceSelect.innerHTML = '';
+      skVoiceSelect.appendChild(el('option', { value: keyRow.selected_voice || '' }, keyRow.selected_voice || '✕ Voice fetch failed'));
+      skStatus.innerHTML = '<span style="color:#ff8888">✕ ' + String(e.message).slice(0, 140) + '</span>';
+    }
+  }
+
+  skModelSelect.addEventListener('change', async () => {
+    const keyRow = currentKeys.find(k => k.is_active && k.provider === 'gemini') || currentKeys.find(k => k.provider === 'gemini');
+    if (!keyRow) return;
+    skStatus.innerHTML = '<span class="spin">◌</span> Naye model ki live voices aa rahi hain…';
+    await loadSavedVoices(keyRow, skModelSelect.value);
+    skStatus.textContent = 'Model selected: ' + skModelSelect.value + ' — voice chunein ya seedha "Apply" dabayen.';
+    refreshQuotaCard(skModelSelect.value, true);
+  });
+
+  skVoiceSelect.addEventListener('change', () => {
+    skStatus.textContent = 'Voice selected: ' + skVoiceSelect.value + ' — "Apply" dabayen ya seedha naye model/voice se Jarvis ki baatein sun lein.';
+  });
+
+  const skApplyBtn = el('button', { class: 'btn primary', style: 'margin-top:8px;font-size:10px;padding:5px 14px;background:var(--mint);color:#000;border-color:var(--mint)' }, '✓ APPLY (Save karein is key par)');
+  skApplyBtn.onclick = async () => {
+    const keyRow = currentKeys.find(k => k.is_active && k.provider === 'gemini') || currentKeys.find(k => k.provider === 'gemini');
+    if (!keyRow) { skStatus.innerHTML = '<span style="color:#ff8888">✕ Gemini key vault mein nahi mili</span>'; return; }
+    if (!skModelSelect.value && !skVoiceSelect.value) { skStatus.innerHTML = '<span style="color:#ff8888">✕ Pehle model/voice select karein</span>'; return; }
+    skStatus.innerHTML = '<span class="spin">◌</span> Saving…';
+    try {
+      await window.jarvis.voice.updateKeyModelVoice({ id: keyRow.id, selectedModel: skModelSelect.value || null, selectedVoice: skVoiceSelect.value || null });
+      currentKeys = await window.jarvis.voice.getKeys();
+      updateVoiceKeysUI();
+      updateVoiceChainUI();
+      await updateDualEngineStatus();
+      skStatus.innerHTML = '<span style="color:var(--mint)">✓ Saved! Jarvis ab <b>' + (skVoiceSelect.value || 'selected voice') + '</b> voice mein, <b>' + (skModelSelect.value || 'selected model') + '</b> par bolega.</span>';
+      toast('✓ Voice/Model change saved — ab isi selection par bolega!');
+    } catch (e) {
+      skStatus.innerHTML = '<span style="color:#ff8888">✕ ' + String(e.message).slice(0, 140) + '</span>';
+    }
+  };
+  savedKeyPanel.append(skApplyBtn);
+
+  async function maybeShowSavedKeyEditor() {
+    const gk = currentKeys.find(k => k.is_active && k.provider === 'gemini') || currentKeys.find(k => k.provider === 'gemini');
+    if (gk && gk.selected_voice) {
+      await openSavedKeyEditor(gk);
+    } else {
+      savedKeyPanel.style.display = 'none';
+    }
+  }
+
   // Assemble Main Voice Tab Panel
   container.append(
     el('div', { class: 'panel' },
@@ -2836,6 +3061,7 @@ async function renderVoice(container) {
         el('span', { class: 'badge green' }, '● PRIORITY CHAIN: ACTIVE')
       ),
       dualEngineStatusCard,
+      savedKeyPanel,
       el('div', { class: 'form-row' },
         el('div', { class: 'form-label' }, '◈ SPEECH FALLBACK CHAIN (drag ⋮⋮ to reorder fallback sequence)'),
         chainRow
@@ -2845,6 +3071,9 @@ async function renderVoice(container) {
       settingsPanel
     )
   );
+
+  // Agar pehle se saved Gemini voice key hai to voice-change panel foran dikha do
+  maybeShowSavedKeyEditor().catch(e => console.warn('saved key editor:', e));
 }
 
 /* ═══════════════════════════════════ 6. MEMORY — LIVE SQLite ═══════════════════════════════════ */

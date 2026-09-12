@@ -264,10 +264,52 @@ global.fetch = (input, init) => {
 };
 
 const realLoad = Module._load;
+
+// ─── mock database for VoiceManager-level tests ───
+const voiceKeyRows = [{
+  id: 1,
+  provider: 'gemini',
+  key_name: 'Gemini Voice Key 1',
+  raw_key: 'TESTKEY123',
+  selected_voice: 'Puck',
+  selected_model: 'gemini-live-2.5-flash-native-audio',
+  custom_endpoint: null,
+  is_active: 1,
+  status: 'valid',
+  priority: 1,
+  quota_used: 0,
+  last_used: null,
+  masked_key: 'TEST••••••••123'
+}];
+
+function makeMockDb() {
+  return {
+    logActivity: () => true,
+    getSetting: () => null,
+    setSetting: () => true,
+    getActiveVoiceKeys: () => voiceKeyRows.map(r => ({ ...r })),
+    listVoiceKeys: () => voiceKeyRows.map(r => ({ ...r })),
+    getDecryptedVoiceKey: (id) => { const r = voiceKeyRows.find(x => x.id === id); return r ? { ...r } : null; },
+    updateVoiceKey: (id, patch) => {
+      const r = voiceKeyRows.find(x => x.id === id);
+      if (!r) return false;
+      Object.assign(r, patch);
+      return true;
+    },
+    getActiveApiKeys: () => []
+  };
+}
+
 Module._load = function patchedLoad(request, parent, isMain) {
   if (request === 'ws') return { WebSocket: MockLiveWebSocket };
-  if (request === '../database') {
-    return { logActivity: () => true, getSetting: () => null, setSetting: () => true };
+  if (request === '../database') return makeMockDb();
+  if (request === './adapters') {
+    // getVoiceAdapter used by VoiceManager — gemini resolves to the same adapter under test
+    return {
+      getVoiceAdapter: (provider) => (provider === 'gemini' ? new GeminiVoiceAdapter() : null),
+      VOICE_PROVIDERS: [{ id: 'gemini', name: 'Google AI (Gemini)', glyph: '✦', badge: 'TTS + STT' }],
+      detectVoiceKeyMismatch: () => ({ mismatch: false })
+    };
   }
   return realLoad.apply(this, arguments);
 };
@@ -485,6 +527,43 @@ async function main() {
     try { await a.synthesize(KEY, 'Puck', 'hello', { model: 'chat-only-model' }); }
     catch (e) { err = e; }
     ok('T13a chat-only model gives paid/nonspeech guidance not crash', err && /paid|PAID|speech/i.test(err.message), err && err.message.slice(0, 90));
+  }
+
+  console.log('\n════════ T14. VoiceManager: exact model+voice routing ════════');
+  {
+    const VoiceManager = require(path.join(ROOT, 'src/main/voice/manager'));
+
+    // a) Live session uses the EXACT model saved on the key (user dropdown selection)
+    const started = await VoiceManager.startLiveSession({});
+    ok('T14a live session starts with saved model + saved voice',
+      started.success === true && started.model === 'gemini-live-2.5-flash-native-audio' && started.voice === 'Puck',
+      JSON.stringify({ model: started.model, voice: started.voice }));
+    await VoiceManager.stopLiveSession();
+
+    // b) Explicit non-live model is refused with clear guidance (no silent TTS fallback for live mode)
+    let err = null;
+    try { await VoiceManager.startLiveSession({ model: 'gemini-2.5-flash-preview-tts' }); }
+    catch (e) { err = e; }
+    ok('T14b non-live model refused for Live Mode with guidance', err && /not a Live API|Live API Dialog/i.test(err.message), err && err.message.slice(0, 90));
+
+    // c) updateKeyModelVoice persists the new selection on the SAME key (no delete/re-add)
+    const upd = await VoiceManager.updateKeyModelVoice({ id: 1, selectedModel: 'gemini-2.5-flash-preview-tts', selectedVoice: 'Kore' });
+    ok('T14c updateKeyModelVoice saves new model+voice', upd.success === true && upd.key.selectedModel === 'gemini-2.5-flash-preview-tts' && upd.key.selectedVoice === 'Kore');
+
+    // d) TTS synthesize then uses the EXACT updated selection (no auto-switch)
+    const synth = await VoiceManager.synthesize('Salam boss', {});
+    ok('T14d TTS uses exact saved selection after update', synth.provider === 'gemini' && synth.audioBase64, JSON.stringify(synth).slice(0, 80));
+
+    // e) Real live quota fetch for the selected model
+    const quota = await VoiceManager.getModelQuota('gemini', KEY, 'gemini-2.5-flash-preview-tts', true);
+    ok('T14e quota is a REAL live fetch (ping Ok on free-tier model)', quota.liveFetch === true && quota.pingOk === true && quota.isPaidTierOnly === false, JSON.stringify(quota).slice(0, 120));
+
+    // f) Paid-tier-only (limit:0) model is flagged, never faked as available
+    const quotaPaid = await VoiceManager.getModelQuota('gemini', KEY, 'gemini-2.5-flash-preview-image', true);
+    ok('T14f limit:0 model flagged paid-tier-only with provider guidance', quotaPaid.liveFetch === true && quotaPaid.pingOk === false && quotaPaid.isPaidTierOnly === true, (quotaPaid.pingError || '').slice(0, 90));
+
+    // g) restore key selection for idempotent re-runs
+    await VoiceManager.updateKeyModelVoice({ id: 1, selectedModel: 'gemini-live-2.5-flash-native-audio', selectedVoice: 'Puck' });
   }
 
   console.log('\n════════════════════════════════════════');

@@ -371,11 +371,16 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
     if (status === 429 && (t.includes('limit: 0') || t.includes('limit:0'))) {
       return { type: 'paid', retriable: false };
     }
-    if (status === 429 && (t.includes('quota') || t.includes('rate') || t.includes('resource_exhausted'))) {
+    // Ordinary 429 (per-minute/day quota exhausted) is RATE-LIMIT, never "paid model".
+    // Google's generic 429 text always contains "billing details" — that must NOT be
+    // misread as this being a paid-tier-only model (real user-reported confusion).
+    if (status === 429) {
       return { type: 'rate', retriable: true };
     }
-    if (status === 429 || t.includes('billing') || t.includes('paid tier') || t.includes('free tier') ||
-        t.includes('permission_denied') || t.includes('does not have access')) {
+    if (t.includes('billing') && (t.includes('must') || t.includes('required') || t.includes('add') || t.includes('enable'))) {
+      return { type: 'paid', retriable: false };
+    }
+    if (t.includes('permission_denied') || t.includes('does not have access')) {
       return { type: 'paid', retriable: false };
     }
     if (t.includes('location') && t.includes('not supported') || t.includes('user location') || t.includes('service region')) {

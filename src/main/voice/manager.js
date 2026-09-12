@@ -76,6 +76,13 @@ class VoiceManager {
     if (!adapter) {
       throw new Error(`Unknown voice provider: "${provider}"`);
     }
+    // Renderer saved-key lists pass no raw key (getKeys is masked for security).
+    // Resolve the REAL key from the vault so live fetching always works.
+    if (!key || !String(key).trim()) {
+      const vk = db.getActiveVoiceKeys().find(k => k.provider === provider) ||
+                 db.getActiveApiKeys().find(k => k.provider === provider);
+      if (vk && vk.raw_key) key = vk.raw_key;
+    }
 
     const keyHash = crypto.createHash('sha256').update(String(key) + (customEndpoint || '') + '|' + String(model || '')).digest('hex').slice(0, 16);
     const cacheKey = `${provider}_voices_${keyHash}`;
@@ -112,6 +119,11 @@ class VoiceManager {
     const adapter = getVoiceAdapter(provider);
     if (!adapter) {
       throw new Error(`Unknown voice provider: "${provider}"`);
+    }
+    if (!key || !String(key).trim()) {
+      const vk = db.getActiveVoiceKeys().find(k => k.provider === provider) ||
+                 db.getActiveApiKeys().find(k => k.provider === provider);
+      if (vk && vk.raw_key) key = vk.raw_key;
     }
 
     const keyHash = crypto.createHash('sha256').update(String(key) + (customEndpoint || '') + '_' + category).digest('hex').slice(0, 16);
@@ -399,15 +411,23 @@ class VoiceManager {
       throw new Error('No active Google AI (Gemini) key found. Please add a Gemini key in the Voice API or Brain tab to use Live Mode.');
     }
 
-    let useModel = model || geminiVoiceKey?.selected_model;
+    // MODEL RESOLUTION PRIORITY: explicit request → saved selection on the active
+    // Gemini voice key → first live-discovered Live-API model. The exact model the
+    // user picked in the dropdown MUST be the model this session runs on.
+    let useModel = model || geminiVoiceKey?.selected_model || null;
     if (!useModel) {
       const liveModels = await this.fetchModels('gemini', rawKey, null, false, 'live').catch(() => []);
       useModel = liveModels[0]?.id;
     }
 
+    if (!useModel) {
+      throw new Error('No Live API model selected. Open Voice API tab, add your Gemini key, and pick a [Live API Dialog ⚡] model from the dropdown.');
+    }
+
     // Guard: refuse non-live models early with a clear message instead of a cryptic
     // WebSocket failure. (Live API only accepts bidiGenerateContent models.)
-    if (useModel && !/live|native-audio|realtime|bidi/i.test(useModel)) {
+    const GeminiVoiceAdapter = require('./adapters/gemini');
+    if (!new GeminiVoiceAdapter().isLiveModel(useModel)) {
       throw new Error(
         `Model "${useModel}" is not a Live API (bidiGenerateContent) model, so realtime mic conversation cannot run on it. ` +
         `Select a model with the [Live API Dialog ⚡] badge for Live Mode, or use Standard Voice Mode (STT/Brain/TTS) with this model.`
@@ -415,6 +435,7 @@ class VoiceManager {
     }
 
     const useVoice = voice || geminiVoiceKey?.selected_voice || 'Puck';
+    console.log(`[VoiceManager] Live session starting with EXACT user selection — model: "${useModel}", voice: "${useVoice}"`);
 
     return await this.liveSession.startSession({
       apiKey: rawKey,
@@ -425,8 +446,98 @@ class VoiceManager {
     });
   }
 
+  /**
+   * Voice dropdown stays alive after key save: user can re-pick model/voice on the
+   * SAME saved key at any time (no delete + re-add cycle).
+   */
+  async updateKeyModelVoice({ id, selectedModel = null, selectedVoice = null }) {
+    if (!id) throw new Error('Voice key id is required');
+    const patch = {};
+    if (selectedModel !== null) patch.selected_model = String(selectedModel).trim() || null;
+    if (selectedVoice !== null) patch.selected_voice = String(selectedVoice).trim() || null;
+    if (!Object.keys(patch).length) throw new Error('Nothing to update — select a model or voice first');
+    const ok = db.updateVoiceKey(id, patch);
+    if (!ok) throw new Error('Update failed — nothing changed');
+    const row = db.getDecryptedVoiceKey(id);
+    db.logActivity('Voice API', `Voice selection changed on "${row?.key_name || id}" → model: ${patch.selected_model || '(unchanged)'}, voice: ${patch.selected_voice || '(unchanged)'}`, null, 'success');
+    this.invalidateActiveConfig();
+    return { success: true, key: row ? { id: row.id, keyName: row.key_name, selectedVoice: row.selected_voice, selectedModel: row.selected_model } : null };
+  }
+
   sendLiveAudio(base64Pcm16) {
     return this.liveSession.sendAudioChunk(base64Pcm16);
+  }
+
+  /**
+   * REAL live quota/usage fetch for the selected model. Free tier: one real
+   * generateContent ping gives the model's exact current availability. Paid tier
+   * (billing enabled): Google also bills exactly this ping — no fake numbers anywhere.
+   */
+  async getModelQuota(provider, key, model, forceRefresh = false) {
+    const crypto = require('crypto');
+    const cacheKey = crypto.createHash('sha256').update(`${provider}|${key}|${model}|${forceRefresh ? Date.now() : 'cached'}`).digest('hex').slice(0, 16);
+    if (!forceRefresh && this._quotaCache && this._quotaCache.key === cacheKey && (Date.now() - this._quotaCache.at) < 30000) {
+      return this._quotaCache.data;
+    }
+
+    if (provider !== 'gemini') {
+      return { provider, model, liveFetch: false, note: 'Live quota endpoint sirf Google AI (Gemini) ke liye hai — billing details ' + 'aapke provider dashboard mein dekhein.' };
+    }
+    // Renderer ko raw key handle karne ki zaroorat nahi: vault se khud resolve karo.
+    if (!key || !String(key).trim()) {
+      const vk = db.getActiveVoiceKeys().find(k => k.provider === 'gemini');
+      if (vk && vk.raw_key) key = vk.raw_key;
+      else {
+        const bk = db.getActiveApiKeys().find(k => k.provider === 'gemini');
+        if (bk && bk.raw_key) key = bk.raw_key;
+      }
+    }
+    if (!key) throw new Error('Quota check ke liye Gemini API key chahiye — Voice API tab mein key add karein');
+
+    const adapter = getVoiceAdapter('gemini');
+    const modelOk = model ? await adapter.validateKey(key, { model, silent: true }).then(r => r && r.valid).catch(() => false) : false;
+
+    const t0 = Date.now();
+    let ping = null;
+    if (model) {
+      try {
+        // Single-call probe WITHOUT any fallback: the quota card must show the
+        // SELECTED model's real status, not a silently-switched fallback model's.
+        let probeRes;
+        if (adapter.isLiveModel(model)) probeRes = await adapter.probeLiveVoice(key, model, 'Puck');
+        else probeRes = await adapter.probeTtsVoice(key, model, 'Puck');
+        const clsType = probeRes && probeRes.cls ? probeRes.cls.type : (probeRes && probeRes.ok ? 'ok' : 'other');
+        ping = {
+          success: !!probeRes.ok,
+          type: clsType,
+          error: probeRes.ok ? null : (probeRes.errText || 'Model probe failed')
+        };
+      } catch (e) {
+        ping = { success: false, type: 'error', error: e.message };
+      }
+    }
+
+    const voiceKeys = db.getActiveVoiceKeys().filter(k => k.provider === provider);
+    const row = voiceKeys.find(k => k.selected_model === model) || voiceKeys[0];
+
+    const data = {
+      provider: 'Google AI (Gemini)',
+      model,
+      liveFetch: true,
+      modelValid: modelOk,
+      pingOk: !!(ping && ping.success),
+      pingError: ping && ping.error ? String(ping.error).slice(0, 300) : null,
+      pingType: ping ? ping.type : null,
+      pingLatencyMs: Date.now() - t0,
+      isPaidTierOnly: !!(ping && !ping.success && ping.type === 'paid'),
+      local: {
+        sessionRequests: row ? (row.quota_used || 0) : 0,
+        lastUsed: row ? row.last_used : null,
+        trackedSince: 'app install'
+      }
+    };
+    this._quotaCache = { key: cacheKey, at: Date.now(), data };
+    return data;
   }
 
   async stopLiveSession() {
