@@ -10,6 +10,10 @@ const { autoUpdater } = require('electron-updater');
 const db = require('./src/main/database');
 const { brainManager } = require('./src/main/brain');
 const { voiceManager } = require('./src/main/voice');
+const orchestrator = require('./src/main/orchestrator');
+
+// Phase 4: Orchestrator = single LLM path through BrainManager (RULE 3)
+orchestrator.attachBrain(brainManager);
 
 let mainWindow = null;
 
@@ -129,6 +133,27 @@ ipcMain.handle('brain:chat', async (event, { messages, options, requestId }) => 
 
   return await brainManager.chat(messages, options || {}, onChunk, onKeySwitch);
 });
+
+// ─── IPC: Orchestrator + Agent Framework (Phase 4) ─────────────────
+ipcMain.handle('orch:run', async (event, { request, source, forceClassification, requestId }) => {
+  const onProgress = (payload) => {
+    if (requestId && event.sender && !event.sender.isDestroyed()) {
+      event.sender.send(`orch:progress:${requestId}`, payload);
+    }
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('orch:progress', payload); // global feed (Agents tab)
+    }
+  };
+  return await orchestrator.run(String(request || ''), {
+    source: source === 'voice' ? 'voice' : 'chat',
+    forceClassification: forceClassification || null,
+    onProgress
+  });
+});
+ipcMain.handle('orch:cancel', (_e, runId) => orchestrator.cancel(runId));
+ipcMain.handle('orch:agents', () => orchestrator.listAgents());
+ipcMain.handle('orch:history', (_e, limit) => orchestrator.getHistory(limit || 50));
+ipcMain.handle('orch:stats', () => orchestrator.getStats());
 
 // ─── IPC: Voice API Runtime (The Single STT/TTS Path) ──────────────
 ipcMain.handle('voice:getProviders', () => voiceManager.getProviders());

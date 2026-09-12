@@ -120,6 +120,43 @@ const MIGRATIONS = [
         CREATE INDEX IF NOT EXISTS idx_voice_keys_active ON voice_keys(is_active);
       `);
     }
+  },
+  {
+    version: 4,
+    name: 'orchestrator-agent-runs-schema',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS agent_runs (
+          id             INTEGER PRIMARY KEY AUTOINCREMENT,
+          request        TEXT NOT NULL,
+          source         TEXT NOT NULL DEFAULT 'chat' CHECK (source IN ('chat','voice','api')),
+          classification TEXT,
+          plan           TEXT,
+          status         TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','succeeded','failed','cancelled')),
+          result         TEXT,
+          error          TEXT,
+          started_at     TEXT NOT NULL DEFAULT (datetime('now')),
+          ended_at       TEXT,
+          duration_ms    INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_runs_started ON agent_runs(started_at);
+        CREATE INDEX IF NOT EXISTS idx_agent_runs_status ON agent_runs(status);
+
+        CREATE TABLE IF NOT EXISTS agent_steps (
+          id          INTEGER PRIMARY KEY AUTOINCREMENT,
+          run_id      INTEGER NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+          step_index  INTEGER NOT NULL,
+          agent       TEXT NOT NULL,
+          description TEXT,
+          status      TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','succeeded','failed','skipped')),
+          result      TEXT,
+          error       TEXT,
+          duration_ms INTEGER,
+          created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_steps_run ON agent_steps(run_id);
+      `);
+    }
   }
 ];
 

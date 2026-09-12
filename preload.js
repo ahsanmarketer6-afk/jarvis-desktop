@@ -88,6 +88,28 @@ contextBridge.exposeInMainWorld('jarvis', {
         });
     }
   },
+  // Phase 4: Orchestrator + Agent Framework
+  orch: {
+    run: (request, opts = {}, onProgress = null) => {
+      const requestId = 'orch_' + Math.random().toString(36).slice(2, 10);
+      let listener = null;
+      if (typeof onProgress === 'function') {
+        listener = (_e, payload) => onProgress(payload);
+        ipcRenderer.on(`orch:progress:${requestId}`, listener);
+      }
+      return ipcRenderer.invoke('orch:run', { request, source: opts.source || 'chat', forceClassification: opts.forceClassification || null, requestId })
+        .finally(() => { if (listener) ipcRenderer.removeListener(`orch:progress:${requestId}`, listener); });
+    },
+    cancel: (runId) => ipcRenderer.invoke('orch:cancel', runId),
+    agents: () => ipcRenderer.invoke('orch:agents'),
+    history: (limit) => ipcRenderer.invoke('orch:history', limit),
+    stats: () => ipcRenderer.invoke('orch:stats'),
+    onProgress: (cb) => {
+      const listener = (_e, payload) => cb(payload);
+      ipcRenderer.on('orch:progress', listener);
+      return () => ipcRenderer.removeListener('orch:progress', listener);
+    }
+  },
   // Voice API system (The Single STT/TTS Runtime Path)
   voice: {
     getProviders: () => ipcRenderer.invoke('voice:getProviders'),

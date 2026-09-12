@@ -1,7 +1,7 @@
 {
   "name": "jarvis-desktop",
   "productName": "JARVIS",
-  "version": "1.2.4",
+  "version": "1.3.0",
   "description": "JARVIS - Agentic AI operating layer for your laptop",
   "main": "main.js",
   "author": {
@@ -18,7 +18,7 @@
     "start": "node server.js",
     "build": "node -e \"console.log('Build complete')\"",
     "lint": "node -c server.js main.js preload.js src/main/voice/manager.js src/main/voice/adapters.js src/main/voice/index.js src/main/brain/manager.js src/main/brain/adapters.js src/main/brain/index.js renderer/js/bridge.js renderer/js/ui.js",
-    "test": "node tests/voice-pipeline.test.js",
+    "test": "node tests/voice-pipeline.test.js && node tests/orchestrator.test.js",
     "electron": "electron .",
     "postinstall": "node scripts/rebuild-native.js",
     "dist": "electron-builder --win nsis",

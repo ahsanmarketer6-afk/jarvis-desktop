@@ -892,12 +892,15 @@ function renderChat(container) {
     window.jarvis.app.getVersion().then(v => { versionTag.textContent = 'v' + v + ' — CLOUD VOICE ACTIVE'; });
   }
 
+  const taskPanelSlot = el('div', { id: 'task-panel-slot' });
+
   const right = el('div', { class: 'transcript-col' },
     el('div', { class: 'transcript-card' },
       el('div', { class: 'transcript-head' },
         el('span', {}, '◉ TRANSCRIPT'),
         activeModelTag),
       scroll,
+      taskPanelSlot,
       el('div', { class: 'composer' }, input, sendBtn),
       el('div', { class: 'status-line' }, statusLeft, versionTag)
     )
@@ -924,7 +927,8 @@ function renderChat(container) {
         window.jarvis.voice.live.sendText(m.text).catch(() => {});
         return;
       }
-      jarvisRespond();
+      // Phase 4: Orchestrator = single entry point (chat fast path included)
+      orchestratorRespond(m.text);
     }
   }
 
@@ -1098,6 +1102,126 @@ function renderChat(container) {
     }
   }
 
+  /* ═══ Phase 4: Orchestrator response + live Task Progress panel ═══ */
+  function buildTaskPanel() {
+    taskPanelSlot.innerHTML = '';
+    const list = el('div', { class: 'task-steps' });
+    const headStatus = el('span', { class: 'm-tag' }, 'running');
+    const cancelBtn = el('button', { class: 'btn', style: 'font-size:9px;padding:2px 10px;' }, '✕ CANCEL');
+    const panel = el('div', { class: 'task-panel' },
+      el('div', { class: 'task-head' },
+        el('span', { class: 'task-title' }, '⧉ TASK PROGRESS'),
+        headStatus, cancelBtn),
+      list);
+    taskPanelSlot.appendChild(panel);
+
+    const stepEls = new Map(); // stepIndex → row element
+    let runId = null;
+    let done = false;
+
+    cancelBtn.onclick = () => { if (runId != null) window.jarvis.orch.cancel(runId); };
+
+    function stepRow(idx, agent, desc) {
+      if (stepEls.has(idx)) return stepEls.get(idx);
+      const glyph = el('span', { class: 'ts-glyph' }, '·');
+      const label = el('span', { class: 'ts-label' }, `${idx || '•'} ${agent}: ${desc || ''}`);
+      const row = el('div', { class: 'task-step' }, glyph, label);
+      stepEls.set(idx, { row, glyph, label });
+      list.appendChild(row);
+      return stepEls.get(idx);
+    }
+
+    function setStep(idx, status, note) {
+      const s = stepRow(idx);
+      const map = {
+        running: ['◔', 'ts-run'], queued: ['·', ''],
+        done: ['✓', 'ts-ok'], failed: ['✗', 'ts-fail'], retry: ['↻', 'ts-run'], skipped: ['—', '']
+      };
+      const [g, cls] = map[status] || map.queued;
+      s.glyph.textContent = g;
+      s.glyph.className = 'ts-glyph ' + cls;
+      if (note) s.label.textContent = `${idx} ${note}`;
+    }
+
+    return {
+      onStart(req) { headStatus.textContent = 'classifying…'; },
+      onClassified(c) { headStatus.textContent = c; },
+      onPlan(plan) { (plan || []).forEach(s => stepRow(s.index, s.agent, s.description)); },
+      onStep(p) {
+        if (p.type === 'step-start') { setStep(p.step, 'running', `${p.agent}: ${p.description || ''}`); headStatus.textContent = p.agent + (p.attempt > 1 ? ' (retry)' : ''); }
+        else if (p.type === 'step-progress' && p.detail && p.step != null) { setStep(p.step, 'running', `${p.agent}: ${p.detail}`); }
+        else if (p.type === 'step-retry') { setStep(p.step, 'retry'); }
+        else if (p.type === 'step-done') { setStep(p.step, 'done', p.agent); }
+        else if (p.type === 'step-failed') { setStep(p.step, 'failed'); }
+      },
+      setRunId(id) { runId = id; },
+      finish(ok, note) {
+        if (done) return; done = true;
+        cancelBtn.remove();
+        headStatus.textContent = ok ? '✓ ' + (note || 'done') : '✗ ' + (note || 'failed');
+        headStatus.className = 'm-tag ' + (ok ? 'green-t' : 'red-t');
+        setTimeout(() => { panel.classList.add('fade'); setTimeout(() => panel.remove(), 600); }, 8000);
+      }
+  };
+  }
+
+  async function orchestratorRespond(request) {
+    if (!window.jarvis?.orch?.run) { jarvisRespond(); return; } // bridge safety fallback
+    stopSpeaking();
+    chatState.busy = true;
+    setGlobeState('thinking');
+    document.querySelectorAll('.state-btn').forEach(b => b.classList.toggle('on', b.dataset.state === 'thinking'));
+    statusLeft.textContent = 'Jarvis is orchestrating…';
+
+    const typingMsg = { role: 'jarvis', text: '', typing: false, tag: 'Orchestrator', emo: 'attentive' };
+    chatState.messages.push(typingMsg);
+    renderMsgs(scroll);
+
+    const panel = buildTaskPanel();
+    let streamStarted = false;
+
+    try {
+      const res = await window.jarvis.orch.run(request, { source: 'chat' }, (p) => {
+        if (p.type === 'start') panel.onStart(p.request);
+        else if (p.type === 'classified') panel.onClassified(p.classification);
+        else if (p.type === 'plan') panel.onPlan(p.plan);
+        else if (p.type === 'step-start' || p.type === 'step-progress' || p.type === 'step-retry' || p.type === 'step-done' || p.type === 'step-failed') panel.onStep(p);
+        else if (p.type === 'step-progress' && typeof p.partial === 'string') {
+          if (!streamStarted) { streamStarted = true; setGlobeState('speaking'); statusLeft.textContent = 'Jarvis is responding…'; }
+          typingMsg.text += p.partial;
+          renderMsgs(scroll);
+        }
+      });
+      panel.setRunId(res.runId);
+      typingMsg.typing = false;
+      if (!typingMsg.text && res && res.result) typingMsg.text = res.result;
+      if (res && res.classification) typingMsg.tag = `Orchestrator · ${res.classification}`;
+      panel.finish(true, res.classification || 'done');
+      if (typingMsg.text) speakResponse(typingMsg.text);
+    } catch (err) {
+      const msg = err?.message || 'orchestration failed';
+      typingMsg.typing = false;
+      if (msg === 'cancelled') {
+        typingMsg.text = '⏹ Task cancelled.';
+        typingMsg.tag = 'Cancelled';
+        panel.finish(false, 'cancelled');
+      } else {
+        typingMsg.text = `⚠️ Task failed: ${msg}`;
+        typingMsg.tag = 'Orchestrator Error';
+        panel.finish(false, 'failed');
+        toast('Task failed: ' + msg, true);
+      }
+    } finally {
+      chatState.busy = false;
+      if (chatState.state !== 'speaking') {
+        setGlobeState('idle');
+        statusLeft.textContent = 'Standing by for command';
+        document.querySelectorAll('.state-btn').forEach(b => b.classList.toggle('on', b.dataset.state === 'idle'));
+      }
+      renderMsgs(scroll);
+    }
+  }
+
   function renderMsgs(scroll) {
     scroll.innerHTML = '';
     chatState.messages.forEach((m, idx) => {
@@ -1196,7 +1320,100 @@ function renderAgents(container) {
   search.oninput = draw; catSel.onchange = draw; stSel.onchange = draw;
   draw();
 
+  /* ── Phase 4: REAL framework agents + run history (live DB) ── */
+  const fwGrid = el('div', { class: 'agent-grid' });
+  const fwCount = el('span', { class: 'muted' }, 'loading…');
+  const histList = el('div', { class: 'run-history' });
+  const statRow = el('div', { class: 'filter-row', style: 'gap:8px' });
+
+  function drawFramework(data) {
+    const agents = (data && data.agents) || [];
+    const stats = (data && data.stats) || { totals: {}, byAgent: [] };
+    const history = (data && data.history) || [];
+    fwGrid.innerHTML = '';
+    fwCount.textContent = agents.length + ' REGISTERED AGENTS';
+
+    // Totals strip
+    statRow.innerHTML = '';
+    const t = stats.totals || {};
+    [['SUCCEEDED', t.succeeded || 0, 'green'], ['FAILED', t.failed || 0, 'red'], ['CANCELLED', t.cancelled || 0, 'amber'], ['RUNNING', t.running || 0, 'gray']].forEach(([label, n, cls]) => {
+      statRow.append(el('span', { class: 'badge ' + cls }, `${label}: ${n}`));
+    });
+
+    // Agent cards (real registry)
+    const perAgent = {};
+    (stats.byAgent || []).forEach(s => { perAgent[s.agent] = s; });
+    agents.forEach(a => {
+      const s = perAgent[a.name];
+      const card = el('div', { class: 'agent-card' },
+        el('div', { class: 'agent-top' },
+          el('div', { class: 'agent-ic' }, '◈'),
+          el('div', { style: 'flex:1' },
+            el('div', { class: 'agent-name' }, a.name),
+            el('div', { class: 'agent-desc' }, a.description)
+          )
+        ),
+        el('div', { class: 'agent-row' },
+          el('span', { class: 'badge green' }, '● LIVE'),
+          (a.capabilities || []).slice(0, 3).map(c => el('span', { class: 'badge gray' }, c))),
+        s ? el('div', { class: 'agent-row muted', style: 'font-size:10px' },
+          `runs: ${s.total} · ok: ${s.succeeded} · fail: ${s.failed} · avg: ${Math.round(s.avg_ms || 0)}ms`) : null
+      );
+      fwGrid.appendChild(card);
+    });
+
+    // Run history with expandable steps
+    histList.innerHTML = '';
+    if (!history.length) {
+      histList.appendChild(el('div', { class: 'empty' },
+        el('div', { class: 'e-ic' }, '☰'),
+        el('div', { class: 'e-tx' }, 'NO TASK RUNS YET'),
+        el('div', { class: 'muted' }, 'Chat mein complex task likhein — run history yahan aayegi')
+      ));
+    }
+    history.forEach(r => {
+      const cls = { succeeded: 'green', failed: 'red', cancelled: 'amber', running: 'gray' }[r.status] || 'gray';
+      const stepsBox = el('div', { style: 'display:none;padding:6px 0 2px 14px' });
+      (r.steps || []).forEach(s => {
+        const sCls = { succeeded: 'green', failed: 'red', skipped: 'amber', running: 'gray' }[s.status] || 'gray';
+        stepsBox.append(el('div', { class: 'muted', style: 'font-size:10px;margin:2px 0' },
+          `${s.status === 'succeeded' ? '✓' : s.status === 'failed' ? '✗' : '·'} #${s.step_index} ${s.agent} (${s.duration_ms || 0}ms)${s.error ? ' — ' + s.error.slice(0, 80) : ''}`));
+      });
+      const expander = el('div', { class: 'conn-card', style: 'cursor:pointer' },
+        el('div', { class: 'conn-info' },
+          el('div', { class: 'conn-name', style: 'font-size:11px' }, String(r.request || '').slice(0, 70)),
+          el('div', { class: 'conn-sub' }, `#${r.id} · ${r.classification || '?'} · ${r.source} · ${r.duration_ms || 0}ms`)),
+        el('span', { class: 'badge ' + cls }, r.status.toUpperCase()));
+      expander.onclick = () => { stepsBox.style.display = stepsBox.style.display === 'none' ? 'block' : 'none'; };
+      histList.append(expander, stepsBox);
+    });
+  }
+
+  async function refreshFramework() {
+    try {
+      const [agents, stats, history] = await Promise.all([
+        window.jarvis.orch.agents(), window.jarvis.orch.stats(), window.jarvis.orch.history(30)
+      ]);
+      drawFramework({ agents, stats, history });
+    } catch (e) {
+      fwCount.textContent = 'framework bridge unavailable';
+    }
+  }
+  refreshFramework();
+
   container.append(
+    el('div', { class: 'panel' },
+      el('div', { class: 'panel-head' },
+        el('div', { class: 'panel-title' }, el('span', { class: 'pt-ic' }, '◈'), 'ORCHESTRATOR — LIVE FRAMEWORK'),
+        fwCount
+      ),
+      statRow,
+      fwGrid,
+      el('div', { class: 'panel-head', style: 'margin-top:14px' },
+        el('div', { class: 'panel-title' }, el('span', { class: 'pt-ic' }, '☰'), 'TASK RUN HISTORY'),
+        el('span', { class: 'muted', style: 'font-size:10px' }, 'click to expand steps')),
+      histList
+    ),
     el('div', { class: 'panel' },
       el('div', { class: 'panel-head' },
         el('div', { class: 'panel-title' }, el('span', { class: 'pt-ic' }, '▣'), 'AGENT REGISTRY'),

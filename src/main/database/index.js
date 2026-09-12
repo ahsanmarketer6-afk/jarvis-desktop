@@ -395,12 +395,81 @@ function remove(table, id) {
   return true;
 }
 
+/* ─── Agent runs + steps (Phase 4: Orchestrator) ────────────────── */
+
+function insertAgentRun({ request, source = 'chat', classification = null, plan = null }) {
+  const info = db.prepare('INSERT INTO agent_runs (request, source, classification, plan) VALUES (?, ?, ?, ?)')
+    .run(String(request || ''), source, classification, plan ? JSON.stringify(plan) : null);
+  return info.lastInsertRowid;
+}
+
+function updateAgentRun(id, { classification, plan, status, result, error } = {}) {
+  const ended = status && status !== 'running';
+  db.prepare(`UPDATE agent_runs SET
+      classification = COALESCE(?, classification),
+      plan           = COALESCE(?, plan),
+      status         = COALESCE(?, status),
+      result         = COALESCE(?, result),
+      error          = COALESCE(?, error),
+      ended_at       = CASE WHEN ? THEN datetime('now') ELSE ended_at END,
+      duration_ms    = CASE WHEN ? THEN CAST((julianday('now') - julianday(started_at)) * 86400000 AS INTEGER) ELSE duration_ms END
+    WHERE id = ?`).run(
+    classification ?? null, plan ? JSON.stringify(plan) : null, status ?? null,
+    result ?? null, error ?? null, ended ? 1 : 0, ended ? 1 : 0, id);
+  return true;
+}
+
+function insertAgentStep({ runId, stepIndex, agent, description = null }) {
+  const info = db.prepare('INSERT INTO agent_steps (run_id, step_index, agent, description) VALUES (?, ?, ?, ?)')
+    .run(runId, stepIndex, agent, description);
+  return info.lastInsertRowid;
+}
+
+function updateAgentStep(id, { status, result, error } = {}) {
+  db.prepare(`UPDATE agent_steps SET
+      status      = COALESCE(?, status),
+      result      = COALESCE(?, result),
+      error       = COALESCE(?, error),
+      duration_ms = CASE WHEN ? IS NOT NULL THEN CAST((julianday('now') - julianday(created_at)) * 86400000 AS INTEGER) ELSE duration_ms END
+    WHERE id = ?`).run(status ?? null, result ?? null, error ?? null, status ?? null, id);
+  return true;
+}
+
+function getAgentRun(id) {
+  const r = db.prepare('SELECT * FROM agent_runs WHERE id = ?').get(id);
+  if (r) { try { r.plan = r.plan ? JSON.parse(r.plan) : null; } catch (e) { /* keep raw */ } }
+  return r || null;
+}
+
+function listAgentRuns({ limit = 50 } = {}) {
+  const rows = db.prepare('SELECT * FROM agent_runs ORDER BY id DESC LIMIT ?').all(limit);
+  for (const r of rows) { try { r.plan = r.plan ? JSON.parse(r.plan) : null; } catch (e) { /* keep raw */ } }
+  return rows;
+}
+
+function getAgentSteps(runId) {
+  return db.prepare('SELECT * FROM agent_steps WHERE run_id = ? ORDER BY step_index ASC, id ASC').all(runId);
+}
+
+function getAgentStats() {
+  const byStatus = db.prepare('SELECT status, COUNT(*) AS n FROM agent_runs GROUP BY status').all();
+  const byAgent = db.prepare(`SELECT agent,
+      COUNT(*) AS total,
+      SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END) AS succeeded,
+      SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+      AVG(duration_ms) AS avg_ms
+    FROM agent_steps GROUP BY agent`).all();
+  const totals = { running: 0, succeeded: 0, failed: 0, cancelled: 0 };
+  for (const r of byStatus) if (totals[r.status] !== undefined) totals[r.status] = r.n;
+  return { totals, byAgent };
+}
+
 /* ─── status for Settings UI ────────────────────────────────────── */
 
 function status() {
   if (!db) return { connected: false };
   const tables = {};
-  for (const t of ['api_keys', 'voice_keys', 'settings', 'memory', 'activity_log', 'workflows', 'notifications', 'schema_version']) {
+  for (const t of ['api_keys', 'voice_keys', 'settings', 'memory', 'activity_log', 'workflows', 'notifications', 'agent_runs', 'agent_steps', 'schema_version']) {
     try {
       tables[t] = db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get().n;
     } catch (e) {
@@ -426,5 +495,7 @@ module.exports = {
   addMemory, getMemory, updateMemory, deleteMemory,
   insertApiKey, listApiKeys, getDecryptedApiKey, getActiveApiKeys, updateApiKey, deleteApiKey, reorderApiKeys,
   insertVoiceKey, listVoiceKeys, getDecryptedVoiceKey, getActiveVoiceKeys, updateVoiceKey, deleteVoiceKey, reorderVoiceKeys,
-  insert, list, update, remove
+  insert, list, update, remove,
+  insertAgentRun, updateAgentRun, insertAgentStep, updateAgentStep,
+  getAgentRun, listAgentRuns, getAgentSteps, getAgentStats
 };
