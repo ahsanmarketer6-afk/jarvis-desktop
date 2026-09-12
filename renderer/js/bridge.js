@@ -866,8 +866,8 @@
             const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key.trim())}&pageSize=1000`);
             if (res.ok) {
               const data = await res.json();
-              const EXCLUDED = ['embedding', 'aqa', 'imagen', 'veo', 'robotics', 'lyria', 'nano-banana', 'computer-use', 'image-generation'];
-              const RETIRED = ['gemini-2.0-flash-live-001', 'gemini-2.5-flash-preview-tts', 'gemini-2.5-pro-preview-tts'];
+              const EXCLUDED = ['embedding', 'aqa', 'imagen', 'image', 'veo', 'robotics', 'lyria', 'nano-banana', 'computer-use'];
+              const RETIRED = ['gemini-2.0-flash-live-001'];
               const models = (data.models || [])
                 .map(m => {
                   const id = (m.name || '').replace(/^(models\/)+/i, '').trim();
@@ -882,7 +882,7 @@
                   if (EXCLUDED.some(ex => lowerId.includes(ex) || (m.displayName || '').toLowerCase().includes(ex))) return false;
                   if (category === 'live') return methods.includes('bidiGenerateContent') || isLiveCapable;
                   if (category === 'tts') return isDedicatedTts || isLiveCapable || methods.includes('generateContent');
-                  if (category === 'stt') return !/native-audio|bidi-only/.test(lowerId) && methods.includes('generateContent');
+                  if (category === 'stt') return !/native-audio|bidi-only|tts|image/.test(lowerId) && methods.includes('generateContent');
                   return methods.includes('generateContent') || methods.includes('bidiGenerateContent');
                 })
                 .map(({ m, id, methods, isLiveCapable, isDedicatedTts }) => {

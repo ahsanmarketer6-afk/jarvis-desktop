@@ -600,7 +600,16 @@ class VoiceManager {
       }
     }
 
-    throw new Error(`All active STT voice keys failed. Last error: ${lastError?.message || 'Unknown failure'}`);
+    const lastMsg = String(lastError?.message || 'Unknown failure');
+    if (/429|quota|resource_exhausted/i.test(lastMsg)) {
+      throw new Error(
+        'STT quota khatam ho gaya hai (Gemini free-tier 429). Aapke paas 2 asaan options hain: ' +
+        '(1) Voice API tab mein Groq (Whisper) key add karein — STT ke liye fastest + generous free tier, ' +
+        'ya (2) 1-2 minute wait karke dobara mic dabayen (per-minute quota reset hota hai). ' +
+        `\n(Technical detail: ${lastMsg.slice(0, 260)})`
+      );
+    }
+    throw new Error(`All active STT voice keys failed. Last error: ${lastMsg}`);
   }
 }
 

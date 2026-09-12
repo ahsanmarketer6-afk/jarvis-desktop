@@ -52,6 +52,27 @@ const GEMINI_VOICE_CATALOG = [
 
 const VOICE_CACHE_TTL_MS = 5 * 60 * 1000;      // dropdowns auto-refresh every 5 min
 
+/**
+ * Attaches WebSocket handlers in a way that works with BOTH the Node `ws`
+ * package (EventEmitter — .on('open'|'message'|'error'|'close')) and browser
+ * WebSocket (onopen/onmessage properties). The `ws` package silently IGNORES
+ * `ws.onopen = fn` property assignments — this was a real bug that made Live
+ * sessions hang until timeout in the Electron main process.
+ */
+function attachWsHandlers(ws, handlers) {
+  if (typeof ws.on === 'function') {
+    ws.on('open', () => handlers.onopen());
+    ws.on('message', (data) => handlers.onmessage({ data }));
+    ws.on('error', (err) => handlers.onerror({ message: (err && err.message) || 'websocket error' }));
+    ws.on('close', (code, reason) => handlers.onclose({ code, reason: reason ? String(reason) : '' }));
+  } else {
+    ws.onopen = handlers.onopen;
+    ws.onmessage = handlers.onmessage;
+    ws.onerror = handlers.onerror;
+    ws.onclose = handlers.onclose;
+  }
+}
+
 class GeminiVoiceAdapter extends BaseVoiceAdapter {
   constructor() {
     super('gemini', 'Google AI (Gemini)', { tts: true, stt: true, live: true });
@@ -137,8 +158,11 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
       }
 
       if (res.status === 429) {
-        this.audioInputCapabilityCache.set(cacheKey, { capable: true, testedAt: Date.now() });
-        return true;
+        // Quota exhausted (or free-tier limit: 0 for this model) — capability is
+        // UNVERIFIABLE right now. Never report "capable" from a 429 and never cache
+        // it: a stale true here sent STT traffic to image models (limit 0 → 429 loop).
+        console.warn(`[Gemini Voice Adapter] Probe: "${cleanModel}" is quota-limited (429) — treating as NOT audio-input capable (not cached).`);
+        return false;
       }
 
       this.audioInputCapabilityCache.set(cacheKey, { capable: false, testedAt: Date.now() });
@@ -222,9 +246,12 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
       throw new Error('Google AI (Gemini): models list endpoint did not return any models for this key.');
     }
 
-    // Exclude non-multimodal / specialized non-conversational models
-    const EXCLUDED = ['embedding', 'aqa', 'imagen', 'veo', 'robotics', 'text-bison', 'chat-bison', 'code-bison',
-      'lyria', 'nano-banana', 'computer-use', 'image-generation', 'gemini-2.0-flash-exp-image', 'gemma-3n-e4b-it-imp'];
+    // Exclude non-multimodal / specialized / non-conversational models.
+    // 'image' catches gemini-2.5-flash-preview-image, gemini-2.0-flash-preview-image,
+    // flash-image, imagen etc. — these are IMAGE-GENERATION models with ZERO free-tier
+    // speech quota (limit: 0) and must never enter voice dropdowns or STT candidates.
+    const EXCLUDED = ['embedding', 'aqa', 'imagen', 'image', 'veo', 'robotics', 'text-bison', 'chat-bison', 'code-bison',
+      'lyria', 'nano-banana', 'computer-use', 'gemma-3n-e4b-it-imp'];
     const candidates = rawList.filter(m => {
       const methods = m.supportedGenerationMethods || [];
       const hasGen = methods.includes('generateContent') || methods.includes('bidiGenerateContent');
@@ -235,14 +262,10 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
       return true;
     });
 
-    // TEMPORARILY / PERMANENTLY RETIRED MODELS — these appear in some cached listings
-    // but are "no longer available" (404) on every endpoint. They must never show in dropdowns.
-    const RETIRED_PATTERNS = [
-      'gemini-2.0-flash-live-001',
-      'gemini-2.5-flash-preview-tts',
-      'gemini-2.5-pro-preview-tts',
-      'deprecated', 'retired'
-    ];
+    // PERMANENTLY RETIRED MODELS — still listed by some cached endpoints but rejected
+    // (404 "no longer available") on every real call. Anything else that turns out to
+    // be dead at call time is handled dynamically via error-driven re-filtering.
+    const RETIRED_PATTERNS = ['gemini-2.0-flash-live-001', 'deprecated', 'retired'];
 
     const filtered = candidates.filter(m => {
       const methods = m.supportedGenerationMethods || [];
@@ -257,14 +280,18 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
       }
 
       if (category === 'tts') {
-        // TTS-capable = dedicated TTS models (REST audio out) OR Live models (native audio dialog)
+        // Voice models ONLY: dedicated TTS models (REST audio-out) or Live API models
+        // (native-audio dialog). Plain chat-only models NEVER appear in this dropdown —
+        // user requirement: "koi aisa model show na ho jo sirf chat k liye hai".
         const isTtsModel = id.includes('tts');
-        return isTtsModel || supportsBidi || methods.includes('generateContent');
+        return isTtsModel || supportsBidi;
       }
 
       if (category === 'stt') {
-        // Models with native-audio or bidi-only cannot be used for REST generateContent STT
-        if (id.includes('native-audio') || id.includes('bidi-only')) return false;
+        // REST STT candidates: must accept audio input via generateContent.
+        // TTS-only models (text→audio, no audio input) and native-audio/Live-only
+        // models cannot transcribe via REST — they are excluded here.
+        if (id.includes('native-audio') || id.includes('bidi-only') || id.includes('tts')) return false;
         return methods.includes('generateContent');
       }
 
@@ -284,9 +311,18 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
       if (finalFiltered.length === 0 && filtered.length > 0) {
         finalFiltered = filtered.filter(m => {
           const id = (m.name || '').toLowerCase();
-          return !id.includes('native-audio') && !id.includes('bidi-only');
+          return !id.includes('native-audio') && !id.includes('bidi-only') && !id.includes('tts') && !id.includes('image');
         });
       }
+      // Prefer fast flash-tier models for transcription latency
+      finalFiltered.sort((a, b) => {
+        const an = (a.name || '').toLowerCase();
+        const bn = (b.name || '').toLowerCase();
+        const ap = an.includes('flash') ? 0 : 1;
+        const bp = bn.includes('flash') ? 0 : 1;
+        if (ap !== bp) return ap - bp;
+        return an.localeCompare(bn);
+      });
     }
 
     const models = finalFiltered.map(m => {
@@ -321,7 +357,10 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
       };
     }).filter(m => !m.isRetired);
 
-    // Sort order: Live models first, then dedicated TTS, then alphabetical by model ID
+    // Sort order: Live models first, then dedicated TTS, then alphabetical by model ID.
+    // For the STT category the caller cares about transcription latency, so flash-tier
+    // models are pinned to the very front (this runs AFTER the generic sort so the
+    // flash priority is not overwritten by the alphabetical tie-break).
     models.sort((a, b) => {
       if (a.isLiveCapable && !b.isLiveCapable) return -1;
       if (!a.isLiveCapable && b.isLiveCapable) return 1;
@@ -329,6 +368,14 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
       if (!a.isDedicatedTts && b.isDedicatedTts) return 1;
       return a.id.localeCompare(b.id);
     });
+    if (category === 'stt') {
+      models.sort((a, b) => {
+        const ap = a.id.toLowerCase().includes('flash') ? 0 : 1;
+        const bp = b.id.toLowerCase().includes('flash') ? 0 : 1;
+        if (ap !== bp) return ap - bp;
+        return a.id.localeCompare(b.id);
+      });
+    }
 
     return models;
   }
@@ -363,6 +410,10 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
 
   classifyProbeError(status, errText) {
     const t = String(errText || '').toLowerCase();
+    // Free-tier limit: 0 on this model = effectively paid-only, retrying never helps
+    if (status === 429 && (t.includes('limit: 0') || t.includes('limit:0'))) {
+      return { type: 'paid', retriable: false };
+    }
     if (status === 429 && (t.includes('quota') || t.includes('rate') || t.includes('resource_exhausted'))) {
       return { type: 'rate', retriable: true };
     }
@@ -373,12 +424,22 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
     if (t.includes('location') && t.includes('not supported') || t.includes('user location') || t.includes('service region')) {
       return { type: 'region', retriable: false };
     }
+    // Voice-name rejection MUST be checked BEFORE the generic "not supported" retired
+    // rule — e.g. "Voice name Foo is not supported for models/..." means THIS VOICE is
+    // invalid, not that the model is dead.
+    if (t.includes('voice') && (t.includes('invalid') || t.includes('not supported') || t.includes('unknown'))) {
+      return { type: 'voice', retriable: false };
+    }
+    // Model exists but cannot produce speech output (chat-only model given AUDIO modality)
+    if (t.includes('response modalities') || t.includes('multi-modal output') || t.includes('modalities are not supported')) {
+      return { type: 'nonspeech', retriable: false };
+    }
+    if (t.includes('bidigeneratecontent') && (t.includes('only') || t.includes('supported method'))) {
+      return { type: 'liveonly', retriable: false };
+    }
     if (t.includes('is no longer available') || t.includes('not found') || status === 404 ||
         t.includes('unsupported') || t.includes('is not supported')) {
       return { type: 'retired', retriable: false };
-    }
-    if (t.includes('voice') && (t.includes('invalid') || t.includes('not supported') || t.includes('unknown'))) {
-      return { type: 'voice', retriable: false };
     }
     if (status === 400) {
       // Could be voice rejection or model rejection — treat as voice-invalid so the probe continues
@@ -453,7 +514,8 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
         return finish({ ok: false, status: 0, cls: { type: 'network', retriable: true }, errText: err.message });
       }
 
-      ws.onopen = () => {
+      attachWsHandlers(ws, {
+        onopen: () => {
         try {
           const setupMsg = {
             setup: {
@@ -472,9 +534,9 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
         } catch (e) {
           finish({ ok: false, status: 0, cls: { type: 'network', retriable: true }, errText: e.message });
         }
-      };
+      },
 
-      ws.onmessage = (event) => {
+      onmessage: (event) => {
         try {
           const raw = typeof event.data === 'string' ? event.data : (event.data instanceof Buffer ? event.data.toString('utf8') : '');
           if (!raw) return;
@@ -486,16 +548,17 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
             finish({ ok: false, status: data.error.code || 0, cls, errText: (data.error.message || '').slice(0, 400) });
           }
         } catch (e) { /* keep waiting */ }
-      };
+      },
 
-      ws.onclose = (closeEvent) => {
+      onclose: (closeEvent) => {
         // Server closes without setupComplete when the voice is unknown to the model
         finish({ ok: false, status: closeEvent.code || 0, cls: { type: 'voice', retriable: false }, errText: closeEvent.reason || `closed (${closeEvent.code})` });
-      };
+      },
 
-      ws.onerror = (errEvent) => {
+      onerror: (errEvent) => {
         finish({ ok: false, status: 0, cls: { type: 'network', retriable: true }, errText: errEvent.message || 'websocket error' });
-      };
+      }
+    });
     });
   }
 
@@ -520,17 +583,14 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
       return cached.voices.map(v => ({ ...v, cached: true }));
     }
 
-    const isLive = this.isLiveModel(model);
-    const isTts = this.isDedicatedTtsModel(model);
+    const isLiveByName = this.isLiveModel(model);
+    // No hard name-based rejection here: probes classify errors precisely, so a
+    // mis-named model is auto-switched to the Live path when REST says "bidi only",
+    // and chat-only / paid / dead models get their exact guidance from probe errors.
+    let useLiveProbe = isLiveByName;
+    let isLive = isLiveByName;
 
-    if (!isLive && !isTts) {
-      throw new Error(
-        `Model "${model}" does not produce speech output. Voice discovery requires a Live API model (e.g. gemini-2.5-flash-native-audio-latest) ` +
-        `or a dedicated TTS model (e.g. gemini-2.5-flash-preview-tts). Please select a voice/speech model from the dropdown.`
-      );
-    }
-
-    console.log(`[Gemini Voice Adapter] 🔎 Live voice discovery for model "${model}" (${isLive ? 'Live API' : 'REST TTS'})...`);
+    console.log(`[Gemini Voice Adapter] 🔎 Live voice discovery for model "${model}" (${useLiveProbe ? 'Live API' : 'REST TTS'})...`);
 
     // Candidate order: probe a few distinct archetypes first to classify errors
     // cheaply, then decide between full catalog vs hard failure.
@@ -543,15 +603,28 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
     let regionError = null;
 
     for (const voiceName of probeCandidates) {
-      const probe = isLive
+      const probe = useLiveProbe
         ? await this.probeLiveVoice(cleanKey, model, voiceName)
         : await this.probeTtsVoice(cleanKey, model, voiceName);
 
       if (probe.ok) {
         succeeded.push(voiceName);
+      } else if (probe.cls.type === 'liveonly' && !useLiveProbe) {
+        // Model revealed itself as Live-API-only via REST rejection — switch probe path
+        console.log(`[Gemini Voice Adapter] Model "${model}" is Live-API-only — switching to Live WebSocket voice probing...`);
+        useLiveProbe = true;
+        isLive = true;
+        succeeded = [];
+        lastVoiceRejection = null;
+        continue;
       } else if (probe.cls.type === 'paid') {
         paidError = probe;
         break; // Billing problem — stop probing, surface clear message
+      } else if (probe.cls.type === 'nonspeech') {
+        throw new Error(
+          `Model "${model}" audio output support nahi karta (yeh sirf text/chat model hai). ` +
+          `Voice ke liye [Live API Dialog ⚡] ya [Text-to-Speech ✦] badge wala model select karein.`
+        );
       } else if (probe.cls.type === 'region') {
         regionError = probe;
         break; // Region restriction — stop probing, surface clear message
@@ -766,7 +839,8 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
         return finishError(`WebSocket creation error: ${err.message}`);
       }
 
-      ws.onopen = () => {
+      attachWsHandlers(ws, {
+        onopen: () => {
         console.log('[Gemini Live Test] WebSocket opened. Sending setup payload...');
 
         const setupPayload = {
@@ -799,9 +873,9 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
           clearTimeout(timeoutId);
           finishError(`Failed to send setup to WebSocket: ${err.message}`);
         }
-      };
+      },
 
-      ws.onmessage = (event) => {
+      onmessage: (event) => {
         try {
           const raw = typeof event.data === 'string' ? event.data : (event.data instanceof Buffer ? event.data.toString('utf8') : '');
           if (!raw) return;
@@ -854,15 +928,15 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
         } catch (err) {
           console.error('[Gemini Live Test] Error parsing message:', err);
         }
-      };
+      },
 
-      ws.onerror = (errEvent) => {
+      onerror: (errEvent) => {
         clearTimeout(timeoutId);
         const errorMsg = errEvent.message || 'WebSocket connection error with Gemini Live endpoint';
         finishError(`Google AI (Gemini Live) error: ${errorMsg}`);
-      };
+      },
 
-      ws.onclose = (closeEvent) => {
+      onclose: (closeEvent) => {
         clearTimeout(timeoutId);
         if (!setupComplete && !resolved) {
           finishError(`Gemini Live WebSocket closed before setupComplete (Code ${closeEvent.code}). ` +
@@ -875,7 +949,8 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
         } else if (audioChunks.length > 0) {
           finishSuccess();
         }
-      };
+      }
+    });
     });
   }
 
@@ -925,6 +1000,12 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
       const errText = `${err.message}`.toLowerCase();
       if (res.status === 429 || errText.includes('billing') || errText.includes('paid') || errText.includes('permission')) {
         throw new Error(this.buildPaidTierError(model, err.message));
+      }
+      if (errText.includes('multi-modal output') || errText.includes('response modalities') || errText.includes('modalities are not supported')) {
+        throw new Error(
+          `Model "${model}" sirf text/chat model hai — audio output support nahi karta. ` +
+          `Bolne ke liye [Live API Dialog ⚡] ya [Text-to-Speech ✦] badge wala model select karein. (${err.message})`
+        );
       }
       throw new Error(err.message);
     }
@@ -992,6 +1073,15 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
         );
       }
     }
+
+    // Full ordered candidate list: selected model first, then every other probed STT model.
+    // A 429/quota failure on one model falls through to the next instead of killing transcription.
+    const sttCandidates = [];
+    const pushCandidate = (id) => { if (id && !sttCandidates.includes(id)) sttCandidates.push(id); };
+    pushCandidate(useModel);
+    (await this.fetchModels(cleanKey, { category: 'stt' }).catch(() => []))
+      .map(m => m.id)
+      .forEach(pushCandidate);
 
     // Unpack audio buffer
     let rawBuffer;
@@ -1082,34 +1172,50 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
     };
 
     let textResult = '';
-    try {
-      textResult = await executeRequest(useModel);
-    } catch (err) {
-      const isRetriable = err.message && (
-        err.message.includes('Audio input modality is not enabled') ||
-        err.message.includes('modality is not enabled') ||
-        err.message.includes('is no longer available') ||
-        err.message.includes('not found') ||
-        err.message.includes('404')
-      );
+    let lastError = null;
+    for (const candidateModel of sttCandidates) {
+      try {
+        textResult = await executeRequest(candidateModel);
+        useModel = candidateModel;
+        lastError = null;
+        break;
+      } catch (err) {
+        lastError = err;
+        const msg = String(err.message || '');
+        const permanentModelProblem = (
+          msg.includes('Audio input modality is not enabled') ||
+          msg.includes('modality is not enabled') ||
+          msg.includes('is no longer available') ||
+          msg.includes('not found') ||
+          msg.includes('404')
+        );
+        const quotaProblem = msg.includes('429') || msg.toLowerCase().includes('quota') || msg.toLowerCase().includes('resource_exhausted');
 
-      if (isRetriable) {
-        console.warn(`[Gemini STT] Model "${useModel}" failed audio execution (${err.message}). Invalidating cache and retrying with alternative live model...`);
-        const cacheKey = `${cleanKey.slice(0, 12)}_${useModel.toLowerCase()}`;
-        this.audioInputCapabilityCache.set(cacheKey, { capable: false, testedAt: Date.now() });
-
-        const sttModels = await this.fetchModels(cleanKey, { category: 'stt' }).catch(() => []);
-        const fallback = sttModels.find(m => m.id !== useModel);
-        if (fallback) {
-          console.log(`[Gemini STT] Retrying transcription with fallback model "${fallback.id}"...`);
-          useModel = fallback.id;
-          textResult = await executeRequest(useModel);
-        } else {
-          throw new Error(`Google AI (Gemini) error: Model "${useModel}" failed (${err.message}) and no alternative audio-input models are available.`);
+        if (permanentModelProblem) {
+          // Blacklist this model in the capability cache so it is not picked first again
+          const cacheKey = `${cleanKey.slice(0, 12)}_${candidateModel.toLowerCase()}`;
+          this.audioInputCapabilityCache.set(cacheKey, { capable: false, testedAt: Date.now() });
         }
-      } else {
-        throw err;
+        console.warn(`[Gemini STT] Model "${candidateModel}" failed (${msg.slice(0, 120)}${msg.length > 120 ? '…' : ''}) — trying next candidate...`);
+        if (!quotaProblem && !permanentModelProblem) {
+          // Network/unknown error: retrying other models is still worth it, continue
+          continue;
+        }
+        // quota or permanent: continue to next candidate
+        continue;
       }
+    }
+
+    if (lastError && !textResult) {
+      const msg = String(lastError.message || '');
+      if (msg.includes('429') || msg.toLowerCase().includes('quota')) {
+        throw new Error(
+          `Gemini STT quota exhausted for your free-tier key — saare STT models (\`${sttCandidates.join(', ')}\`) 429 de rahe hain. ` +
+          `Solutions: (1) 1 minute wait karein (per-minute quota resets), (2) Groq Whisper key add karein Voice API tab mein (fast + generous free tier), ` +
+          `ya (3) billing enable karein Google AI Studio mein. (Last error: ${msg.slice(0, 220)})`
+        );
+      }
+      throw lastError;
     }
 
     const latencyMs = Date.now() - t0;

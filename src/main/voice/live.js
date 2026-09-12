@@ -12,6 +12,26 @@ try {
 }
 
 /**
+ * Attaches WebSocket handlers that work with BOTH the Node `ws` package
+ * (EventEmitter: .on('open'|'message'|'error'|'close')) and browser WebSocket
+ * (onopen/onmessage properties). The `ws` package silently IGNORES
+ * `ws.onopen = fn` — a real bug that made Live sessions hang until timeout.
+ */
+function attachWsHandlers(ws, handlers) {
+  if (typeof ws.on === 'function') {
+    ws.on('open', () => handlers.onopen());
+    ws.on('message', (data) => handlers.onmessage({ data }));
+    ws.on('error', (err) => handlers.onerror({ message: (err && err.message) || 'websocket error' }));
+    ws.on('close', (code, reason) => handlers.onclose({ code, reason: reason ? String(reason) : '' }));
+  } else {
+    ws.onopen = handlers.onopen;
+    ws.onmessage = handlers.onmessage;
+    ws.onerror = handlers.onerror;
+    ws.onclose = handlers.onclose;
+  }
+}
+
+/**
  * GeminiLiveSessionManager
  * Manages WebSocket sessions with Gemini Live API (v1beta BidiGenerateContent).
  * Provides continuous bidirectional audio streaming, realtime responses,
@@ -126,6 +146,11 @@ class GeminiLiveSessionManager extends EventEmitter {
         return reject(new Error(`Failed to create Live WebSocket: ${err.message}`));
       }
 
+      // Capture THIS socket's identity: a stale close event from a previous session
+      // must never clobber the state of a newer session (real bug: old socket's late
+      // close nullified this.ws of the fresh session -> "Cannot read properties of null").
+      const socket = this.ws;
+
       const timeoutId = setTimeout(() => {
         if (!resolved) {
           resolved = true;
@@ -134,7 +159,9 @@ class GeminiLiveSessionManager extends EventEmitter {
         }
       }, 12000);
 
-      this.ws.onopen = () => {
+      attachWsHandlers(this.ws, {
+        onopen: () => {
+        if (this.ws !== socket) return; // stale open from a replaced socket — ignore
         console.log('[Gemini Live API] WebSocket connected! Sending setup payload...');
         this.isOpen = true;
         this.retryCount = 0;
@@ -165,7 +192,7 @@ class GeminiLiveSessionManager extends EventEmitter {
         };
 
         try {
-          this.ws.send(JSON.stringify(setupMsg));
+          socket.send(JSON.stringify(setupMsg));
           console.log('[Gemini Live API] Setup payload sent. Waiting for setupComplete…');
         } catch (err) {
           console.error('[Gemini Live API] Failed to send setup message:', err);
@@ -175,9 +202,10 @@ class GeminiLiveSessionManager extends EventEmitter {
             reject(err);
           }
         }
-      };
+      },
 
-      this.ws.onmessage = (event) => {
+      onmessage: (event) => {
+        if (this.ws !== socket) return; // stale frame from a replaced socket — ignore
         // Protocol gate: only treat the session as ready after setupComplete.
         if (!this.setupComplete) {
           try {
@@ -216,7 +244,7 @@ class GeminiLiveSessionManager extends EventEmitter {
                 const msg = data.error.message || JSON.stringify(data.error);
                 reject(new Error(`Gemini Live setup rejected: ${msg}`));
               }
-              try { this.ws.close(); } catch (e) {}
+              try { socket.close(); } catch (e) {}
               return;
             }
             // Server closed-frame path handled by onclose; ignore other frames pre-setup.
@@ -228,9 +256,10 @@ class GeminiLiveSessionManager extends EventEmitter {
         }
 
         this.handleIncomingMessage(event.data);
-      };
+      },
 
-      this.ws.onerror = (errEvent) => {
+      onerror: (errEvent) => {
+        if (this.ws !== socket) return; // stale error from a replaced socket — ignore
         const errorMsg = errEvent.message || 'WebSocket communication error';
         console.error('[Gemini Live API] WebSocket error:', errorMsg);
 
@@ -250,14 +279,20 @@ class GeminiLiveSessionManager extends EventEmitter {
           clearTimeout(timeoutId);
           reject(new Error(`Gemini Live connection error: ${errorMsg}`));
         }
-      };
+      },
 
-      this.ws.onclose = (event) => {
-        console.log(`[Gemini Live API] WebSocket closed (Code: ${event.code}, Reason: ${event.reason || 'Normal'})`);
-        const hadSetupComplete = this.setupComplete;
-        this.isOpen = false;
-        this.setupComplete = false;
-        this.ws = null;
+      onclose: (event) => {
+        const isCurrentSocket = (this.ws === socket);
+        console.log(`[Gemini Live API] WebSocket closed (Code: ${event.code}, Reason: ${event.reason || 'Normal'}, current: ${isCurrentSocket})`);
+        const hadSetupComplete = isCurrentSocket ? this.setupComplete : false;
+        if (isCurrentSocket) {
+          this.isOpen = false;
+          this.setupComplete = false;
+          this.ws = null;
+        } else {
+          // Stale close from an older/replaced socket — new session state untouched
+          return;
+        }
 
         if (this.windowSender && !this.windowSender.isDestroyed()) {
           this.windowSender.send('voice:live:status', { status: 'closed', code: event.code, reason: event.reason });
@@ -292,7 +327,8 @@ class GeminiLiveSessionManager extends EventEmitter {
             }
           }, delay);
         }
-      };
+      }
+      });
     });
   }
 
