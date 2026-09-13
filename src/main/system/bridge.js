@@ -660,7 +660,12 @@ async function startApp(resolved) {
   _cache.delete('apps'); // fresh read for the AFTER snapshot
   const after = await runningApps();
   const newVisible = after.visibleApps.filter(v => !before.has(v.pid));
-  return { started: true, newWindows: newVisible, verified: newVisible.length > 0, path: resolved.path, source: resolved.source };
+  /* MERGE CASE: single-instance apps (notepad/chrome waghera) naya window EXISTING
+     process mein khol dete hain — koi naya pid nahi banta. Verify = naya window YA
+     us app ka koi bhi visible window (basename match). Warna jhoota fail report jata. */
+  const baseExe = path.basename(resolved.path).replace(/\.lnk$/i, '').replace(/\.exe$/i, '').toLowerCase();
+  const matching = after.visibleApps.filter(v => String(v.name).toLowerCase() === baseExe || String(v.name).toLowerCase() === baseExe.replace(/[^a-z0-9]/g, ''));
+  return { started: true, newWindows: newVisible, matchingWindows: matching, verified: newVisible.length > 0 || matching.length > 0, mergedIntoExisting: newVisible.length === 0 && matching.length > 0, path: resolved.path, source: resolved.source };
 }
 
 function kvGet(psResult, key) { return parseKV(psResult.stdout).map[key]; }

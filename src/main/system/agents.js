@@ -135,8 +135,8 @@ class FileAgent extends BaseAgent {
       return out;
     }
 
-    /* ---- ORGANIZE DESKTOP ---- */
-    if (/desktop/.test(t) && /organize|saaf|ikatha|ek folder|sab ko|sari apps/.test(t)) {
+    /* ---- ORGANIZE DESKTOP (sirf EXPLICIT organize intent — create kabhi nahi) ---- */
+    if (/desktop/.test(t) && /organize|saaf\s*(karo|kar do)?|ikatha|ikatha karo|ek jagah|sab (kuch|items|apps|folders|cheezen)|sari apps|sab apps|sary apps/.test(t) && !/\b(banao|bana|bana do|bana de|create|banade)\b/.test(t)) {
       const folderName = (String(task).match(/["']([^"']+)["']/) || [null, 'Jarvis-Organized'])[1];
       const conf = await bridge.requestConfirmation({
         kind: 'organize', title: 'Desktop Organize', appName: 'Desktop',
@@ -182,10 +182,16 @@ class FileAgent extends BaseAgent {
       return out;
     }
 
-    /* ---- NESTED FOLDER CHAIN CREATE ("A, uske andar B, uske andar C") ---- */
-    if (/banao|bana de|create|banado/.test(t) && /folder|directory|dir\b/.test(t)) {
+    /* ---- NESTED FOLDER CHAIN CREATE ("A, uske andar B, uske andar C") ----
+       PEHLE create-check, organize baad mein — "ek folder bana do" kabhi organize na ho.
+       File-creation requests ("folder ke andar text file banao") file-branch ko jati hain. */
+    if (/\b(banao|bana|bana do|bana de|banade|create)\b/.test(t) && /\b(folder|directory|dir)\b/.test(t) && !/\b(file|notepad|\.txt|\.md|\.json|\.csv|\.log)\b/i.test(t)) {
       const chain = this._extractFolderChain(task);
-      if (!chain.length) return 'Folder ka naam samajh nahi aya — "desktop pe folder banao <name>" ya "D: me folder banao <name>" format mein batayein.';
+      if (!chain.length) {
+        /* naam nahi mila — deterministic fallback: "Naya Folder" create karke batao
+           (refusal se behtar: kaam ho gaya + rename ka rasta clear) */
+        chain.push('Naya Folder');
+      }
       let base = extractPathFromText(task);
       if (!base) {
         const dm = String(task).toLowerCase().match(/([a-z])\s*drive/);
@@ -313,18 +319,23 @@ class FileAgent extends BaseAgent {
     return 'File command samajh nahi aayi. Ye try karo: "D drive mein kitne folders hain", "desktop pe folder banao Project, uske andar Src", "text file banao notes.txt isme likho: hello", "desktop kya kya hai".';
   }
 
-  /* extract "A, uske andar B, uske andar C" chain — 'folder' word optional */
+  /* extract "A, uske andar B, uske andar C" chain — 'folder' word optional,
+     naam patterns: quoted | "naam X" | "X folder banao" | adjective+folder */
   _extractFolderChain(task) {
-    const JUNK = /^(banao|bana|create|banade|ban|de|do|text|file|folder|directory|dir|naam|name|with|aik|ek|andar|ka|ki|ke)$/i;
+    const JUNK = /^(banao|bana|create|banade|ban|de|do|text|file|folder|directory|dir|naam|name|with|aik|ek|andar|ka|ki|ke|desktop|pe|par|mein|me|naya|mera|meri|uska|uski|wala|wali|karo|kar|do|dena|dijiye|please|plz|jarvis)$/i;
     const chain = [];
-    const andarRe = /(?:uske andar|us mein|usme|inside|andar)[\s,،]+(?:aik|ek)?\s*(?:(?:folder|directory)\b)?\s*(?:banao|bana de|create|banade)?\s*[,،]?\s*(?:naam|name|with name)?\s*["']?([A-Za-z0-9_\- .()#]{1,60})["']?/gi;
+    const andarRe = /(?:uske andar|us mein|usme|inside|andar)[\s,،]+(?:aik|ek)?\s*(?:(?:folder|directory)\b)?\s*(?:banao|bana de|bana do|create|banade)?\s*[,،]?\s*(?:naam|name|with name)?\s*["']?([A-Za-z0-9_\- .()#]{1,60})["']?/gi;
     let m;
     while ((m = andarRe.exec(String(task))) !== null) {
       const nm = m[1].trim().replace(/[.,]+$/, '');
       if (nm && !JUNK.test(nm) && !/\.(txt|md|json|csv|log)$/i.test(nm)) chain.push(nm);
     }
-    const first = String(task).match(/folder\s*(?:banao|bana de|create|banade)\s*[,،]?\s*(?:with name|naam|name)?\s*["']([A-Za-z0-9_\- .()#]{1,60})["']/i)
-      || String(task).match(/folder\s*(?:banao|bana de|create|banade)\s+([A-Za-z0-9_\-]+)(?:\s*,|\s+uske|\s*$)/i);
+    const T = String(task);
+    const first = T.match(/folder\s*(?:banao|bana de|bana do|create|banade)\s*[,،]?\s*(?:with name|naam|name)?\s*["']([A-Za-z0-9_\- .()#]{1,60})["']/i)
+      || T.match(/folder\s*(?:banao|bana de|bana do|create|banade)\s+([A-Za-z0-9_\-]+)(?:\s*,|\s+uske|\s*$)/i)
+      || T.match(/(?:naam|name)\s*[:\-]?\s*["']?([A-Za-z0-9_\-]{2,50})["']?/i)
+      || T.match(/["']([A-Za-z0-9_\- .()#]{2,50})["']/)
+      || T.match(/([A-Za-z0-9_\-]{2,30})\s+folder\s+(?:banao|bana|bana do|bana de)/i);
     if (first && first[1] && !JUNK.test(first[1].trim())) chain.unshift(first[1].trim().replace(/[.,]+$/, ''));
     return [...new Set(chain.filter(Boolean))];
   }
@@ -394,7 +405,12 @@ class AppControlAgent extends BaseAgent {
         return `⚠ **${appName}** system par nahi mili (where.exe + Start Menu search kiya, kuch nahi mila — guess nahi kiya). Exact naam se try karein.`;
       }
       const res = await bridge.startApp(resolved);
-      logAction('app-control', 'open.app', appName, { via: resolved.source, path: resolved.path }, { verified: res.verified, newWindows: res.newWindows.length }, res.verified, 'success', Date.now() - started);
+      logAction('app-control', 'open.app', appName, { via: resolved.source, path: resolved.path }, { verified: res.verified, newWindows: res.newWindows.length, merged: !!res.mergedIntoExisting }, res.verified, 'success', Date.now() - started);
+      if (res.verified && res.mergedIntoExisting) {
+        /* existing instance mein window khuli — focus bhi de do */
+        try { await bridge.activateWindow(res.matchingWindows[0].name); } catch (e) { /* non-fatal */ }
+        return `✅ **${appName}** open ho gayi aur VERIFY hui — (pehle se chal rahi instance mein window khuli: "${(res.matchingWindows[0] && res.matchingWindows[0].title) || 'window'}") aur samne laya hai.`;
+      }
       return res.verified
         ? `✅ **${appName}** open ho gayi aur VERIFY hui —${res.newWindows[0] ? ` window: "${res.newWindows[0].title}"` : ' naya window process list mein nazar aya'} (via ${resolved.source}).`
         : `⚠ **${appName}** start command di gayi (\`${resolved.path}\`) lekin naya window abhi process list mein nazar nahi aya — background start hua ho sakta hai ya slow hai. Kuch second baad "kitni apps running hain" pooch kar confirm kar lein.`;

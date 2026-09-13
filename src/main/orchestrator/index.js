@@ -121,8 +121,8 @@ class Orchestrator {
           return { runId, dbRunId, result: finalResult, classification: 'agent-roster' };
         }
 
-        // Phase 6: HARDWARE fast-path — RAM/model/battery/network questions
-        if (/\b(?:ram|memory|hardware|laptop|pc model|model kya|battery|gpu|cpu|temperature|specs|kitni ram|kitna ram|charging)\b/.test(t)) {
+        // Phase 6: HARDWARE fast-path — RAM/model/battery/network/disk questions
+        if (/\b(?:ram|memory|hardware|laptop|pc model|model kya|battery|gpu|cpu|temperature|specs|kitni ram|kitna ram|charging|network|wifi|wi-fi|internet|online|offline|ip address|disk|storage|ssd|hard drive)\b/.test(t)) {
           finalResult = await this._executeSteps(dbRunId, runId, request, state, emit,
             [{ index: 1, agent: 'hardware-monitor', description: request }], timeoutMs);
           db.updateAgentRun(dbRunId, { status: 'succeeded', result: finalResult, classification: 'system' });
