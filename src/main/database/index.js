@@ -546,6 +546,44 @@ function updateBackupHistory(id, { status } = {}) {
 
 /* ─── Chat history (Phase 5 fix: chat bhi SQLite mein — restart-proof) ── */
 
+// ─── Phase 6: system actions log + agent enabled-state persistence ────
+function insertSystemAction({ agent, actionType, target = null, parameters = null, result = null, verified = false, status = 'success', latencyMs = null }) {
+  const info = db.prepare(`INSERT INTO system_actions (agent, action_type, target, parameters, result, verified, status, latency_ms)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(String(agent), String(actionType), target, parameters ? JSON.stringify(parameters).slice(0, 2000) : null,
+         result ? String(result).slice(0, 4000) : null, verified ? 1 : 0, status, latencyMs);
+  return info.lastInsertRowid;
+}
+
+function listSystemActions({ limit = 100, agent = null } = {}) {
+  const rows = agent
+    ? db.prepare('SELECT * FROM system_actions WHERE agent = ? ORDER BY id DESC LIMIT ?').all(agent, limit)
+    : db.prepare('SELECT * FROM system_actions ORDER BY id DESC LIMIT ?').all(limit);
+  return rows.map(r => ({ ...r, verified: !!r.verified, parameters: _safeJson(r.parameters), result: _safeJson(r.result) }));
+}
+
+function _safeJson(s) {
+  if (s == null) return null;
+  try { return JSON.parse(s); } catch (e) { return s; }
+}
+
+/* Agent enabled-state: DB-persisted (toggles survive restart), defaults ON */
+function getAgentEnabled(name) {
+  const row = db.prepare('SELECT enabled FROM agent_states WHERE name = ?').get(name);
+  return row ? !!row.enabled : true;
+}
+
+function setAgentEnabled(name, enabled) {
+  db.prepare(`INSERT INTO agent_states (name, enabled, updated_at) VALUES (?, ?, datetime('now'))
+              ON CONFLICT(name) DO UPDATE SET enabled = excluded.enabled, updated_at = datetime('now')`)
+    .run(String(name), enabled ? 1 : 0);
+  return !!enabled;
+}
+
+function listAgentStates() {
+  return db.prepare('SELECT name, enabled FROM agent_states').all().map(r => ({ name: r.name, enabled: !!r.enabled }));
+}
+
 function insertChatMessage({ role, content, tag = null }) {
   if (!/^(user|assistant)$/.test(role) || !String(content || '').trim()) return null;
   const info = db.prepare('INSERT INTO chat_messages (role, content, tag) VALUES (?, ?, ?)')
@@ -569,7 +607,7 @@ function clearChatMessages() {
 function status() {
   if (!db) return { connected: false };
   const tables = {};
-  for (const t of ['api_keys', 'voice_keys', 'settings', 'memory', 'memories', 'chat_messages', 'backup_history', 'activity_log', 'workflows', 'notifications', 'agent_runs', 'agent_steps', 'schema_version']) {
+  for (const t of ['api_keys', 'voice_keys', 'settings', 'memory', 'memories', 'chat_messages', 'backup_history', 'activity_log', 'workflows', 'notifications', 'agent_runs', 'agent_steps', 'system_actions', 'agent_states', 'schema_version']) {
     try {
       tables[t] = db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get().n;
     } catch (e) {
@@ -615,5 +653,6 @@ module.exports = {
   insertMemory, listMemories, updateMemoryV2, deleteMemoryV2, deleteAllMemoriesV2,
   touchMemory, getMemoryStatsV2, getActiveMemories,
   insertBackupHistory, listBackupHistory, updateBackupHistory,
-  insertChatMessage, listChatMessages, clearChatMessages
+  insertChatMessage, listChatMessages, clearChatMessages,
+  insertSystemAction, listSystemActions, getAgentEnabled, setAgentEnabled, listAgentStates
 };

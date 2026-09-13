@@ -4,6 +4,7 @@
    Classify (BrainManager) → route → execute plan step-by-step →
    stream progress → cancellable → retry-once → DB history.
    RULE 3: ALL LLM calls via context.brain (BrainManager). RULE 4+5 enforced.
+   Phase 6: agent awareness (roster prompts, enabled gating, system fast-paths).
    ══════════════════════════════════════════════════════════════════ */
 
 const db = require('../database');
@@ -12,6 +13,8 @@ const { registry } = require('./base-agent');
 // Built-in agents self-register on first require (idempotent via registry dedupe)
 require('./agents');
 require('../memory/agents'); // Phase 5: memory + backup agents (idempotent registration)
+require('../system/agents'); // Phase 6: hardware/file/app-control/system-action/uninstall
+require('./roster-agent');    // Phase 6: agent self-awareness ("kitne agents hain")
 
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -19,12 +22,24 @@ class Orchestrator {
   constructor() {
     this.runs = new Map();        // runId → runtime state (progress listeners, controllers)
     this._nextId = 1;
+    this._statesRestored = false;
+  }
+
+  /* ── 0. Restore persisted enabled states once (toggles survive restart) */
+  _restoreAgentStates() {
+    if (this._statesRestored) return;
+    try {
+      for (const s of db.listAgentStates()) registry.setEnabled(s.name, s.enabled);
+      this._statesRestored = true;
+    } catch (e) { /* DB may not be ready in unit tests — retry next run */ }
   }
 
   /* ── 1. Classification: chat vs task vs research vs system ─────── */
   async classify(request) {
+    const roster = registry.roster(); // Phase 6: Jarvis ALWAYS knows his agents
     const prompt = [
-      { role: 'system', content: 'Classify the user request into exactly ONE word: chat (simple question/conversation), task (needs multiple steps/planning), research (needs analysis/synthesis), system (about this computer\'s hardware/OS). Reply with ONLY that one word.' },
+      { role: 'system', content: 'Classify the user request into exactly ONE word: chat (simple question/conversation), task (needs multiple steps/planning), research (needs analysis/synthesis), system (about this computer\'s hardware/OS or a system action). Reply with ONLY that one word.' },
+      { role: 'system', content: `Available agents (never route to a disabled agent — reply "chat" if the request needs one):\n${roster}` },
       { role: 'user', content: request }
     ];
     try {
@@ -35,6 +50,15 @@ class Orchestrator {
       db.logActivity('Orchestrator', 'Classification failed — defaulting to chat', { error: e.message }, 'failed');
       return 'chat';
     }
+  }
+
+  /* ── 1b. Rule-based system-command routing (fast, deterministic) ── */
+  _routeSystemCommand(t) {
+    if (/\buninstall\b|delete.{0,20}\bapp\b|hatao.{0,20}\bapp\b|remove.{0,20}\bapp\b/.test(t)) return 'uninstall';
+    if (/notepad/.test(t)) return 'app-control';
+    if (/volume|awaz|brightness|roshni|screenshot|screen ?shot|clipboard|recycle|dustbin|sleep|restart|shutdown|shut ?down|lock|task ?manager|settings/.test(t)) return 'system-action';
+    if (/kitni (apps|applications)|running apps|kaunsi apps|band karo|close|kholo|open karo|notepad|chrome|vscode|vs code|calculator/.test(t)) return 'app-control';
+    return 'file';
   }
 
   /* ── 2. Main entry: run(request, opts) ──────────────────────────── */
@@ -57,18 +81,16 @@ class Orchestrator {
     emit({ type: 'start', request });
 
     try {
-      // Classification (forced override supported for tests/UI)
-      const classification = forceClassification || await this.classify(request);
-      db.updateAgentRun(dbRunId, { classification });
-      emit({ type: 'classified', classification });
+      this._restoreAgentStates();
 
-      // Route: system → SystemInfoAgent direct; research/task → plan; chat → fast path
+      // Route: fast-paths first (zero LLM cost), else classify + route
       let finalResult = '';
 
-      // Phase 5: memory/backup fast-path — zero LLM cost, instant routing
       if (!forceClassification) {
         const t = String(request || '').toLowerCase();
-        if (/^(?:jarvis[,:]?\s*)?(?:yaad rakho|remember|yaad rakhna|note kar)\b/.test(t) || /^mera naam /.test(t)) {
+
+        // Phase 5: memory/backup fast-paths (PEHLE — "backup banao" ko file route na karo)
+        if (/^(?:jarvis[,: ]?\s*)?(?:yaad rakho|remember|yaad rakhna|note kar)\b/.test(t) || /^mera naam /.test(t)) {
           finalResult = await this._executeSteps(dbRunId, runId, request, state, emit,
             [{ index: 1, agent: 'memory', description: request }], timeoutMs);
           db.updateAgentRun(dbRunId, { status: 'succeeded', result: finalResult, classification: 'memory' });
@@ -89,21 +111,55 @@ class Orchestrator {
           emit({ type: 'done', result: finalResult, durationMs: Date.now() - started });
           return { runId, dbRunId, result: finalResult, classification: 'backup' };
         }
+
+        // Phase 6: AGENT AWARENESS fast-path — "kitne agents hain?"
+        if (/\b(?:kitne|kitni|kaunse|konse|kaun|kon|list)\b[^\n]{0,30}\bagents?\b/.test(t) || /\bagents?\b[^\n]{0,40}\b(?:kitne|kitni|paas|under|sath|hain)\b/.test(t)) {
+          finalResult = await this._executeSteps(dbRunId, runId, request, state, emit,
+            [{ index: 1, agent: 'agent-roster', description: request }], timeoutMs);
+          db.updateAgentRun(dbRunId, { status: 'succeeded', result: finalResult, classification: 'system' });
+          emit({ type: 'done', result: finalResult, durationMs: Date.now() - started });
+          return { runId, dbRunId, result: finalResult, classification: 'agent-roster' };
+        }
+
+        // Phase 6: HARDWARE fast-path — RAM/model/battery/network questions
+        if (/\b(?:ram|memory|hardware|laptop|pc model|model kya|battery|gpu|cpu|temperature|specs|kitni ram|kitna ram|charging)\b/.test(t)) {
+          finalResult = await this._executeSteps(dbRunId, runId, request, state, emit,
+            [{ index: 1, agent: 'hardware-monitor', description: request }], timeoutMs);
+          db.updateAgentRun(dbRunId, { status: 'succeeded', result: finalResult, classification: 'system' });
+          emit({ type: 'done', result: finalResult, durationMs: Date.now() - started });
+          return { runId, dbRunId, result: finalResult, classification: 'system' };
+        }
+
+        // Phase 6: SYSTEM ACTION fast-path — files/folders/apps/power
+        if (/\b(?:folder|file|drive|desktop|uninstall|notepad|volume|brightness|screenshot|clipboard|recycle|sleep|restart|shutdown|lock|kitni apps|kitne apps|apps running)\b/.test(t)
+            || /\b(?:banao|bana de|banado|kholo|khol do|band karo|band kar do|organize|open karo|chalu karo|uninstall karo)\b/.test(t)) {
+          const route = this._routeSystemCommand(t);
+          finalResult = await this._executeSteps(dbRunId, runId, request, state, emit,
+            [{ index: 1, agent: route, description: request }], timeoutMs);
+          db.updateAgentRun(dbRunId, { status: 'succeeded', result: finalResult, classification: 'system' });
+          emit({ type: 'done', result: finalResult, durationMs: Date.now() - started });
+          return { runId, dbRunId, result: finalResult, classification: 'system' };
+        }
+
       }
+
+      // Classification (forced override supported for tests/UI)
+      const classification = forceClassification || await this.classify(request);
+      db.updateAgentRun(dbRunId, { classification });
+      emit({ type: 'classified', classification });
 
       if (classification === 'system') {
         finalResult = await this._executeSteps(dbRunId, runId, request, state, emit,
-          [{ index: 1, agent: 'system-info', description: request }], timeoutMs);
+          [{ index: 1, agent: 'hardware-monitor', description: request }], timeoutMs);
       } else if (classification === 'chat') {
         finalResult = await this._executeSteps(dbRunId, runId, request, state, emit,
           [{ index: 1, agent: 'conversation', description: request }], timeoutMs);
       } else if (classification === 'research') {
-        // ResearchAgent khud apna planner hai (sub-questions → synthesis) —
-        // planner overhead skip, direct multi-step reasoning
+        // ResearchAgent khud apna planner hai (sub-questions → synthesis)
         finalResult = await this._executeSteps(dbRunId, runId, request, state, emit,
           [{ index: 1, agent: 'research', description: request }], timeoutMs);
       } else {
-        // task/research → planner makes the plan first
+        // task → planner makes the plan first (planner KNOWS the live roster)
         emit({ type: 'planning' });
         const plan = await this._runAgent(dbRunId, runId, 'task-planner', request, state, emit, timeoutMs);
         if (state.cancelled) throw new Error('cancelled');
@@ -174,6 +230,22 @@ class Orchestrator {
     const agent = registry.get(agentName);
     if (!agent) throw new Error(`Unknown agent "${agentName}"`);
 
+    // Phase 6 AWARENESS GATING: disabled agent → immediate clear refusal (result, not crash)
+    this._restoreAgentStates();
+    if (!registry.isEnabled(agentName)) {
+      const msg = `Boss, "${agentName}" agent abhi OFF hai isliye ye kaam nahi kar sakta — Agents tab mein uska toggle ON karein, phir main ye kaam foran kar dunga.`;
+      db.logActivity('Orchestrator', `Blocked: agent "${agentName}" is disabled`, { runId }, 'failed');
+      const stepIndex0 = meta.stepIndex || 0;
+      if (dbRunId && stepIndex0) {
+        try {
+          const rowId = db.insertAgentStep({ runId: dbRunId, stepIndex: stepIndex0, agent: agentName, description: task });
+          db.updateAgentStep(rowId, { status: 'skipped', error: msg.slice(0, 500) });
+        } catch (e) { /* non-fatal */ }
+      }
+      emit({ type: 'step-done', step: stepIndex0, agent: agentName, result: msg, disabled: true });
+      return msg; // refusal IS the final answer — task attempt nahi hota
+    }
+
     const stepIndex = meta.stepIndex || 0;
     const stepRowId = dbRunId && stepIndex ? db.insertAgentStep({ runId: dbRunId, stepIndex, agent: agentName, description: task }) : null;
     const agentStart = Date.now();
@@ -186,7 +258,9 @@ class Orchestrator {
       isCancelled: () => state.cancelled || state.controller.signal.aborted,
       signal: state.controller.signal,
       runId,
-      meta
+      meta,
+      // Phase 6: agents can raise the premium confirmation dialog (RULE 5)
+      confirm: (spec) => require('../system/bridge').requestConfirmation(spec)
     };
 
     const onProgress = (p) => {
@@ -247,6 +321,17 @@ class Orchestrator {
   /* ── 6. History + stats + agent list for UI ────────────────────── */
   listAgents() {
     return registry.list();
+  }
+
+  /* Phase 6: UI toggle → registry (immediate) + DB (persists restart) */
+  setAgentEnabled(name, on) {
+    this._restoreAgentStates();
+    const ok = registry.setEnabled(name, on);
+    if (ok) {
+      try { db.setAgentEnabled(name, !!on); } catch (e) { /* non-fatal */ }
+      db.logActivity('Orchestrator', `Agent "${name}" toggled ${on ? 'ON' : 'OFF'}`, { name, enabled: !!on }, 'success');
+    }
+    return ok;
   }
 
   getHistory(limit = 50) {

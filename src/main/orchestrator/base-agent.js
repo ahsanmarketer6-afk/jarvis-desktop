@@ -12,6 +12,7 @@ class BaseAgent {
     this.name = name;               // unique registry id, e.g. 'system-info'
     this.description = description;
     this.capabilities = capabilities;
+    this.enabled = true;            // Phase 6: awareness — toggled via UI, persisted in DB
     this.cancelled = false;
     this._currentController = null;
   }
@@ -67,25 +68,54 @@ class AgentRegistry {
   get(name) { return this._agents.get(name) || null; }
   has(name) { return this._agents.has(name); }
 
-  /** Stable list for UI + orchestrator routing. */
+  /** Enabled/disabled (awareness) — orchestrator + agents tab use this. */
+  isEnabled(name) {
+    const a = this._agents.get(name);
+    return !a || a.enabled !== false;
+  }
+
+  setEnabled(name, on) {
+    const a = this._agents.get(name);
+    if (!a) return false;
+    a.enabled = !!on;
+    return true;
+  }
+
+  /** Stable list for UI + orchestrator routing (includes enabled state). */
   list() {
     return [...this._agents.values()].map(a => ({
       name: a.name,
       description: a.description,
-      capabilities: [...a.capabilities]
+      capabilities: [...a.capabilities],
+      enabled: a.enabled !== false
     }));
   }
 
-  /** Keyword-overlap scoring: agent with most capability hits wins. */
+  /** Keyword-overlap scoring: agent with most capability hits wins (enabled only). */
   score(task) {
     const t = String(task || '').toLowerCase();
     return this.list()
+      .filter(a => a.enabled)
       .map(({ name, capabilities }) => ({
         name,
         score: capabilities.reduce((n, c) => n + (t.includes(c.toLowerCase()) ? 1 : 0), 0)
       }))
       .filter(x => x.score > 0)
       .sort((a, b) => b.score - a.score);
+  }
+
+  /**
+   * Phase 6 AWARENESS ROSTER — Jarvis hamesha apne agents jaanta hai.
+   * Ye text har planner/classifier prompt mein inject hota hai, aur
+   * "kitne agents hain" sawal ka data yahin se aata hai (live registry).
+   */
+  roster() {
+    const list = this.list();
+    const on = list.filter(a => a.enabled);
+    const off = list.filter(a => !a.enabled);
+    const lines = [`Total agents: ${list.length} (ON: ${on.length}, OFF: ${off.length})`];
+    for (const a of list) lines.push(`- ${a.name} [${a.enabled ? 'ON' : 'OFF'}]: ${a.description}`);
+    return lines.join('\n');
   }
 }
 

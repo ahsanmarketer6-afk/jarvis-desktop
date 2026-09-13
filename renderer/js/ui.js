@@ -1364,21 +1364,33 @@ function renderAgents(container) {
       statRow.append(el('span', { class: 'badge ' + cls }, `${label}: ${n}`));
     });
 
-    // Agent cards (real registry)
+    // Agent cards (real registry) — Phase 6: REAL-TIME TOGGLES (DB-persisted, instant)
     const perAgent = {};
     (stats.byAgent || []).forEach(s => { perAgent[s.agent] = s; });
     agents.forEach(a => {
       const s = perAgent[a.name];
-      const card = el('div', { class: 'agent-card' },
+      const isOn = a.enabled !== false;
+      const toggle = el('div', { class: 'toggle' + (isOn ? ' on' : ''), title: isOn ? 'ON — click to disable' : 'OFF — click to enable' });
+      toggle.onclick = async () => {
+        const newVal = !isOn;
+        try {
+          await window.jarvis.orch.setAgentEnabled(a.name, newVal);
+          a.enabled = newVal;
+          toast(`Agent "${a.name}" ${newVal ? 'ON' : 'OFF'} — Jarvis ko foran pata chal gaya`, !newVal);
+          drawFramework(data); // instant re-render
+        } catch (e) { toast('Toggle fail: ' + e.message, true); }
+      };
+      const card = el('div', { class: 'agent-card' + (isOn ? '' : ' off') },
         el('div', { class: 'agent-top' },
           el('div', { class: 'agent-ic' }, '◈'),
           el('div', { style: 'flex:1' },
             el('div', { class: 'agent-name' }, a.name),
             el('div', { class: 'agent-desc' }, a.description)
-          )
+          ),
+          toggle
         ),
         el('div', { class: 'agent-row' },
-          el('span', { class: 'badge green' }, '● LIVE'),
+          el('span', { class: 'badge ' + (isOn ? 'green' : 'gray') }, isOn ? '● LIVE ON' : '○ OFF'),
           (a.capabilities || []).slice(0, 3).map(c => el('span', { class: 'badge gray' }, c))),
         s ? el('div', { class: 'agent-row muted', style: 'font-size:10px' },
           `runs: ${s.total} · ok: ${s.succeeded} · fail: ${s.failed} · avg: ${Math.round(s.avg_ms || 0)}ms`) : null
@@ -1425,6 +1437,25 @@ function renderAgents(container) {
   }
   refreshFramework();
 
+  /* ── Phase 6: SYSTEM ACTIONS LOG (verified actions audit trail) ── */
+  const sysList = el('div', { class: 'run-history' }, el('div', { class: 'muted', style: 'font-size:11px' }, 'loading…'));
+  (async () => {
+    try {
+      const rows = await window.jarvis.orch.systemActions({ limit: 20 });
+      sysList.innerHTML = '';
+      if (!rows.length) { sysList.append(el('div', { class: 'muted', style: 'font-size:11px' }, 'Koi system action abhi tak nahi hua — Jarvis se kaho "desktop pe folder banao".')); return; }
+      rows.forEach(r => {
+        const vBadge = r.verified ? el('span', { class: 'badge green' }, '✓ VERIFIED') : el('span', { class: 'badge amber' }, '○ UNVERIFIED');
+        const sBadge = el('span', { class: 'badge ' + (r.status === 'success' ? 'green' : r.status === 'failed' ? 'red' : 'amber') }, (r.status || '').toUpperCase());
+        sysList.append(el('div', { class: 'conn-card' },
+          el('div', { class: 'conn-info' },
+            el('div', { class: 'conn-name', style: 'font-size:11px' }, `${r.agent} · ${r.action_type}`),
+            el('div', { class: 'conn-sub' }, `${String(r.target || '—').slice(0, 70)} · ${r.created_at}${r.latency_ms ? ' · ' + r.latency_ms + 'ms' : ''}`)),
+          el('span', { style: 'display:flex;gap:4px' }, vBadge, sBadge)));
+      });
+    } catch (e) { sysList.innerHTML = ''; sysList.append(el('div', { class: 'muted', style: 'font-size:11px' }, 'system actions unavailable: ' + e.message)); }
+  })();
+
   container.append(
     el('div', { class: 'panel' },
       el('div', { class: 'panel-head' },
@@ -1436,7 +1467,11 @@ function renderAgents(container) {
       el('div', { class: 'panel-head', style: 'margin-top:14px' },
         el('div', { class: 'panel-title' }, el('span', { class: 'pt-ic' }, '☰'), 'TASK RUN HISTORY'),
         el('span', { class: 'muted', style: 'font-size:10px' }, 'click to expand steps')),
-      histList
+      histList,
+      el('div', { class: 'panel-head', style: 'margin-top:14px' },
+        el('div', { class: 'panel-title' }, el('span', { class: 'pt-ic' }, '▣'), 'SYSTEM ACTIONS LOG (PHASE 6)'),
+        el('span', { class: 'muted', style: 'font-size:10px' }, 'every real action + verify status')),
+      sysList
     ),
     el('div', { class: 'panel' },
       el('div', { class: 'panel-head' },

@@ -46,8 +46,10 @@ class TaskPlannerAgent extends BaseAgent {
 
   async execute(task, context, onProgress) {
     onProgress({ status: 'running', detail: 'Plan ban raha hai…' });
+    const roster = require('./base-agent').registry.roster(); // Phase 6: planner knows live agents
     const prompt = [
-      { role: 'system', content: 'You are a task planner. Break the user request into 2-5 concise, executable steps. Reply with ONLY a JSON array like: [{"agent":"conversation|research|system-info|task-planner","description":"step description"}]. No markdown, no extra text.' },
+      { role: 'system', content: 'You are a task planner. Break the user request into 2-5 concise, executable steps. Reply with ONLY a JSON array like: [{"agent":"conversation|research|hardware-monitor|file|app-control|system-action|uninstall","description":"step description"}]. No markdown, no extra text.' },
+      { role: 'system', content: `Agent roster (route each step to the RIGHT agent; NEVER use a disabled [OFF] agent):\n${roster}` },
       { role: 'user', content: task }
     ];
     const res = await context.brain.chat(prompt, { stream: false });
@@ -118,7 +120,7 @@ class SystemInfoAgent extends BaseAgent {
     super({
       name: 'system-info',
       description: 'Asli system info: OS, CPU, RAM, disk, battery, network — Node.js APIs se (real actions)',
-      capabilities: ['system', 'cpu', 'ram', 'memory usage', 'disk', 'battery', 'network', 'os version', 'hardware', 'info']
+      capabilities: ['system info', 'os version', 'uptime', 'hostname']
     });
   }
 

@@ -13,6 +13,7 @@ const { voiceManager } = require('./src/main/voice');
 const orchestrator = require('./src/main/orchestrator');
 const memoryManager = require('./src/main/memory/manager');
 const backupManager = require('./src/main/memory/backup');
+const systemBridge = require('./src/main/system/bridge');
 require('./src/main/memory/agents'); // Phase 5: memory/backup agents self-register
 
 // Phase 4: Orchestrator = single LLM path through BrainManager (RULE 3)
@@ -245,6 +246,18 @@ ipcMain.handle('orch:agents', () => orchestrator.listAgents());
 ipcMain.handle('orch:history', (_e, limit) => orchestrator.getHistory(limit || 50));
 ipcMain.handle('orch:stats', () => orchestrator.getStats());
 
+// ─── IPC: Phase 6 — System bridge + agent awareness ────────
+ipcMain.handle('orch:setAgentEnabled', (_e, name, on) => orchestrator.setAgentEnabled(String(name || ''), !!on));
+ipcMain.handle('system:confirm:resolve', (_e, id, action, text) => {
+  systemBridge.resolveConfirmation(String(id || ''), action, text);
+  return true;
+});
+ipcMain.handle('system:actions', (_e, opts) => db.listSystemActions(opts || {}));
+ipcMain.handle('system:hardware', () => systemBridge.fullHardwareReport());
+ipcMain.handle('system:ram', () => systemBridge.ramInfo());
+ipcMain.handle('system:apps', () => systemBridge.runningApps());
+ipcMain.handle('system:drives', () => systemBridge.listDrives());
+
 // ─── IPC: Voice API Runtime (The Single STT/TTS Path) ──────────────
 ipcMain.handle('voice:getProviders', () => voiceManager.getProviders());
 ipcMain.handle('voice:detectMismatch', (_e, provider, key) => voiceManager.detectMismatch(provider, key));
@@ -331,6 +344,12 @@ app.whenReady().then(() => {
     const st = db.init(app.getPath('userData'));
     console.log('[jarvis] database ready:', st.path, 'schema v' + st.version);
 
+    // Phase 6: restore agent enabled-states (toggles survive restart)
+    try {
+      const { registry } = require('./src/main/orchestrator/base-agent');
+      for (const s of db.listAgentStates()) registry.setEnabled(s.name, s.enabled);
+    } catch (e) { /* first run — table empty */ }
+
     // first-launch seed: welcome memories so the UI isn't empty
     const memCount = db.list('memory', { limit: 1 }).length;
     if (memCount === 0) {
@@ -356,6 +375,9 @@ app.whenReady().then(() => {
 
   wireUpdater();
   createWindow();
+
+  // Phase 6: system bridge confirmation plumbing needs the window handle
+  systemBridge.init({ getWindow: () => mainWindow });
 
   setTimeout(() => {
     if (app.isPackaged) {

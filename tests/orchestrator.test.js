@@ -94,7 +94,15 @@ function makeMockDb() {
     },
     getActiveApiKeys: () => [],
     getActiveVoiceKeys: () => [],
-    listVoiceKeys: () => []
+    listVoiceKeys: () => [],
+    insertSystemAction: ({ agent, actionType, target = null, parameters = null, result = null, verified = false, status = 'success', latencyMs = null }) => {
+      DB.activity.push({ agent_name: agent, action: `[sys] ${actionType}: ${target || ''}`, details: JSON.stringify({ verified, status, latencyMs }), status, created_at: new Date().toISOString() });
+      return DB.activity.length;
+    },
+    listSystemActions: ({ limit = 100 } = {}) => DB.activity.filter(a => String(a.action).startsWith('[sys]')).slice(-limit).reverse(),
+    getAgentEnabled: () => true,
+    setAgentEnabled: () => true,
+    listAgentStates: () => []
   };
 }
 
@@ -196,13 +204,16 @@ Module._load = function patchedLoad(request, parent, isMain) {
     check('DB step row for conversation', steps.length === 1 && steps[0].agent === 'conversation' && steps[0].status === 'succeeded');
   });
 
-  /* ── T3: system → real SystemInfoAgent ── */
-  await section('T3: system classification → SystemInfoAgent REAL data', async () => {
-    const res = await orchestrator.run('mera system info batao cpu ram', { timeoutMs: 20000 });
+  /* ── T3: system → real HardwareMonitorAgent (Phase 6) ── */
+  await section('T3: system classification → HardwareMonitorAgent REAL data', async () => {
+    const res = await orchestrator.run('poora hardware report batao', { timeoutMs: 40000 });
     check('classified as system', res.classification === 'system', res.classification);
-    check('real OS platform in result', /Windows|Linux|Darwin/i.test(res.result), res.result && res.result.slice(0, 60));
-    check('real RAM figures in result', /RAM:/.test(res.result) && /GB/.test(res.result));
+    check('real RAM figures in result', /RAM \(LIVE\)|RAM/.test(res.result) && /GB/.test(res.result), res.result && res.result.slice(0, 60));
     check('real CPU model present', /CPU:/.test(res.result));
+    check('real OS platform in result', /Windows|Linux|Darwin/i.test(res.result));
+    const ramRes = await orchestrator.run('ram kahan use ho rahi hai', { timeoutMs: 40000 });
+    check('RAM-specific question → exact LIVE answer', /RAM.*LIVE/.test(ramRes.result) && /GB/.test(ramRes.result), ramRes.result && ramRes.result.slice(0, 60));
+    check('top-process breakdown present', /Process/i.test(ramRes.result));
   });
 
   /* ── T4: task → plan → sequential steps + retry ── */

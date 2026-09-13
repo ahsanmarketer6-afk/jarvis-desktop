@@ -217,6 +217,34 @@ const MIGRATIONS = [
         CREATE INDEX IF NOT EXISTS idx_chat_msgs_id ON chat_messages(id);
       `);
     }
+  },
+  {
+    version: 7,
+    name: 'agent-awareness-system-actions',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS system_actions (
+          id          INTEGER PRIMARY KEY AUTOINCREMENT,
+          agent       TEXT NOT NULL,
+          action_type TEXT NOT NULL,
+          target      TEXT,
+          parameters  TEXT,
+          result      TEXT,
+          verified    INTEGER NOT NULL DEFAULT 0,
+          status      TEXT NOT NULL DEFAULT 'success' CHECK (status IN ('success','failed','cancelled')),
+          latency_ms  INTEGER,
+          created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_sys_actions_agent ON system_actions(agent);
+        CREATE INDEX IF NOT EXISTS idx_sys_actions_time ON system_actions(created_at);
+
+        CREATE TABLE IF NOT EXISTS agent_states (
+          name        TEXT PRIMARY KEY,
+          enabled     INTEGER NOT NULL DEFAULT 1,
+          updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `);
+    }
   }
 ];
 

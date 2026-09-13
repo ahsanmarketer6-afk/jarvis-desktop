@@ -133,6 +133,16 @@ contextBridge.exposeInMainWorld('jarvis', {
     agents: () => ipcRenderer.invoke('orch:agents'),
     history: (limit) => ipcRenderer.invoke('orch:history', limit),
     stats: () => ipcRenderer.invoke('orch:stats'),
+    // Phase 6: real-time agent toggle + system bridge
+    setAgentEnabled: (name, on) => ipcRenderer.invoke('orch:setAgentEnabled', name, on),
+    confirmResolve: (id, action, text) => ipcRenderer.invoke('system:confirm:resolve', id, action, text),
+    onConfirm: (cb) => {
+      const listener = (_e, spec) => cb(spec);
+      ipcRenderer.on('system:confirm', listener);
+      return () => ipcRenderer.removeListener('system:confirm', listener);
+    },
+    systemActions: (opts) => ipcRenderer.invoke('system:actions', opts || {}),
+    hardware: () => ipcRenderer.invoke('system:hardware'),
     onProgress: (cb) => {
       const listener = (_e, payload) => cb(payload);
       ipcRenderer.on('orch:progress', listener);

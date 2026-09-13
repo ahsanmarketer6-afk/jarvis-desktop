@@ -76,6 +76,35 @@ const BOOT_STEPS = [
   'AGENTS ONLINE.'
 ];
 
+function bootConfirmations() {
+  const jar = window.jarvis;
+  if (!jar || !jar.orch || !jar.orch.onConfirm) return;
+  jar.orch.onConfirm((spec) => {
+    const body = el('div', { style: 'font-size:12px;line-height:1.7;max-height:50vh;overflow:auto' });
+    String(spec.detail || '').split('\n').forEach(l => {
+      body.append(el('div', { style: (/⚠|•/.test(l) ? 'color:#e8b34b' : '') }, l));
+    });
+    let getSavePath = null;
+    if (spec.showSaveInput) {
+      const inp = el('input', { class: 'input', placeholder: 'Save location (e.g. D:\\project\\notes.txt)', style: 'margin-top:10px;width:100%', 'data-save-input': '1' });
+      body.append(inp);
+      getSavePath = () => { const i = document.querySelector('[data-save-input]'); return i ? i.value : null; };
+    }
+    const actions = (spec.buttons || ['haan', 'nahi']).map(b => {
+      const isDanger = /uninstall|band karo|force|khali|bina save/i.test(String(b));
+      return el('button', {
+        class: 'btn ' + (isDanger ? 'btn-danger' : 'btn-primary'),
+        onclick: () => { jar.orch.confirmResolve(spec.id, b, getSavePath ? getSavePath() : null); closeModal(); }
+      }, b);
+    });
+    openModal({
+      title: (spec.title || 'CONFIRMATION').toUpperCase(),
+      sub: (spec.kind || 'confirm') + ' — Jarvis ko aapki confirmation chahiye',
+      body, actions
+    });
+  });
+}
+
 function enterApp() {
   document.getElementById('boot-screen').classList.add('hidden');
   document.getElementById('app').classList.remove('hidden');
@@ -83,6 +112,7 @@ function enterApp() {
   bootWindowControls();
   bootVersionPill();
   bootNav();
+  bootConfirmations();
   switchTab('chat');
 }
 
