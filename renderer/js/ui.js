@@ -236,8 +236,8 @@ function renderChat(container) {
   let silenceMonitor = null;
   let analyserNode = null;
   let analyserStream = null;
-  const SILENCE_RUNS_MS = 1600;
-  const SILENCE_THRESHOLD = 0.012;
+  const SILENCE_RUNS_MS = 1100;   // latency: pehle 1600ms tha — answer ~0.5s jaldi jata hai
+  const SILENCE_THRESHOLD = 0.010; // thora sensitive — chup chap bolne par bhi pakre
 
   function clearSilenceMonitor() {
     if (silenceMonitor) { clearInterval(silenceMonitor); silenceMonitor = null; }
@@ -2274,7 +2274,19 @@ async function renderVoice(container) {
         await window.jarvis.voice.updateKeyModelVoice({ id: k.id, selectedModel: modelSel.value || null, selectedVoice: voiceSel.value || null });
         currentKeys = await window.jarvis.voice.getKeys();
         updateVoiceKeysUI();
-        toast('✓ Saved — Jarvis ab "' + (voiceSel.value || k.selected_voice) + '" voice mein bolega');
+        /* VOICE CHANGE = TURANT EFFECT: chalti hui Live session naye voice par
+           RESTART hoti hai (same realtime conversation, nayi awaaz). */
+        let restarted = false;
+        if (liveActive && window.jarvis?.voice?.live) {
+          try {
+            await window.jarvis.voice.live.stop();
+            await window.jarvis.voice.live.start({});
+            restarted = true;
+          } catch (re) {
+            toast('Voice apply hui lekin live restart fail: ' + re.message, true);
+          }
+        }
+        toast('✓ Saved — Jarvis ab "' + (voiceSel.value || k.selected_voice) + '" voice mein bolega' + (restarted ? ' (live session naye voice par restart ho gaya)' : ''));
       } catch (e) {
         toast('✕ ' + e.message, true);
       } finally { applyBtn.disabled = false; }

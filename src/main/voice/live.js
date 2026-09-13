@@ -170,6 +170,7 @@ class GeminiLiveSessionManager extends EventEmitter {
         this.retryCount = 0;
 
         const defaultPrompt = systemInstruction || 'You are JARVIS, an ultra-smart, helpful, witty AI operating layer. Speak naturally, concisely, and conversationally in Roman Urdu and English. Address the user respectfully as Boss.';
+        const withTools = defaultPrompt + '\n\nSYSTEM ACTIONS — IMPORTANT: Aapke paas system-control tools hain (open_app, close_app, create_folder, create_file, open_path, set_volume, take_screenshot, lock_pc, get_ram, get_model, get_disks, get_battery, get_network, get_cpu, get_running_apps, get_desktop, list_folder, read_clipboard, write_clipboard, list_recycle_bin, empty_recycle_bin, uninstall_app, get_temperature, get_volume, volume_mute). JAB BHI user koi system kaam ka ke ho (app kholo/band karo, folder/file banao, ram/model/battery/network/apps pooche, volume, screenshot, pc lock/sleep) to pehle SAHI tool call karo, phir SIRF tool ke real result ke mutabiq bolo. KABHI bhi jhoot na bolo (jaise "opening now" bina tool call ke) — jo tool result aaye wahi bolo, warna honestly bolo ke tool nahi chala.';
 
         const setupMsg = {
           setup: {
@@ -189,6 +190,9 @@ class GeminiLiveSessionManager extends EventEmitter {
                 text: defaultPrompt
               }]
             },
+            tools: [{
+              functionDeclarations: require('./system-tools').DECLS.functionDeclarations
+            }],
             inputAudioTranscription: {},
             outputAudioTranscription: {}
           }
@@ -406,6 +410,35 @@ class GeminiLiveSessionManager extends EventEmitter {
             });
           }
         }
+      }
+
+      // 2a-TOOL. Function call: model ne system action manga → REAL execution via
+      // SystemBridge → nateeja wapis session ko (Jarvis verified truth bolta hai).
+      const toolCall = data.toolCall;
+      if (toolCall && Array.isArray(toolCall.functionCalls) && toolCall.functionCalls.length) {
+        (async () => {
+          for (const fc of toolCall.functionCalls) {
+            if (!fc || !fc.name) continue;
+            let args = {};
+            try { args = typeof fc.args === 'string' ? JSON.parse(fc.args) : (fc.args || {}); } catch (e) { args = {}; }
+            console.log(`[Gemini Live API] 🔧 Tool call: ${fc.name}(${JSON.stringify(args).slice(0, 120)})`);
+            db.logActivity('Gemini Live', `Tool call: ${fc.name}`, { args: JSON.stringify(args).slice(0, 200) }, 'success');
+            const resultText = await require('./system-tools').dispatch(fc.name, args);
+            db.logActivity('Gemini Live', `Tool result: ${fc.name} → ${String(resultText).slice(0, 60)}`, null, 'success');
+            try {
+              this.ws.send(JSON.stringify({
+                toolResponse: {
+                  functionResponses: [{
+                    id: fc.id || undefined,
+                    name: fc.name,
+                    response: { result: resultText }
+                  }]
+                }
+              }));
+            } catch (e) { console.error('[Gemini Live API] toolResponse send fail:', e.message); }
+          }
+        })().catch(e => console.error('[Gemini Live API] tool dispatch error:', e.message));
+        return; // toolCall frame turnComplete nahi hota — response turn alag aata hai
       }
 
       // 2b. Output Audio Transcription (built-in live transcription for native audio)

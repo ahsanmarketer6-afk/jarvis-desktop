@@ -1,7 +1,7 @@
 {
   "name": "jarvis-desktop",
   "productName": "JARVIS",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "JARVIS - Agentic AI operating layer for your laptop",
   "main": "main.js",
   "author": {

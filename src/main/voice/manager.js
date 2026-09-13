@@ -512,6 +512,16 @@ class VoiceManager {
    * Starts a Gemini Live API WebSocket session.
    */
   async startLiveSession({ model, voice = 'Puck', systemInstruction = null, windowSender = null }) {
+    // Phase 5: inject memory into the Live session's system instruction so
+    // realtime voice conversation bhi yaad-dasht ke sath hoti hai.
+    try {
+      const memoryManager = require('../memory/manager');
+      const memBlock = memoryManager.buildContextBlock(null, { limit: 6 });
+      if (memBlock) {
+        systemInstruction = systemInstruction ? `${systemInstruction}\n\n${memBlock}` : memBlock;
+      }
+    } catch (e) { /* memory must never block a live session */ }
+
     // Look for active Gemini key in Voice keys or Brain keys
     const voiceKeys = db.getActiveVoiceKeys();
     const geminiVoiceKey = voiceKeys.find(k => k.provider === 'gemini');
@@ -550,7 +560,17 @@ class VoiceManager {
       );
     }
 
-    const useVoice = voice || geminiVoiceKey?.selected_voice || 'Puck';
+    /* DEFAULT VOICE BUG FIX: selected_voice NULL ho to TTS adapter ke live catalog
+     * se pehli REAL voice lo (koi hardcode nahi — asli API catalog). */
+    let useVoice = voice || (geminiVoiceKey && geminiVoiceKey.selected_voice) || null;
+    if (!useVoice) {
+      try {
+        const GeminiVoiceAdapter = require('./adapters/gemini');
+        const g = new GeminiVoiceAdapter();
+        const vs = await g.fetchVoices(rawKey, {}).catch(() => []);
+        useVoice = (vs && vs[0] && vs[0].id) || 'Puck';
+      } catch (e) { useVoice = 'Puck'; }
+    }
     console.log(`[VoiceManager] Live session starting with EXACT user selection — model: "${useModel}", voice: "${useVoice}"`);
 
     return await this.liveSession.startSession({
