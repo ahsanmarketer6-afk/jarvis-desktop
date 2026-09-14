@@ -24,7 +24,7 @@ class AgentRosterAgent extends BaseAgent {
     const off = list.filter(a => !a.enabled);
     const started = Date.now();
 
-    let out = `**🤖 Boss, mere andar abhi **${list.length} functional agents** hain** (live registry se — jitne naye add honge, yeh count khud badhega):\n\n`;
+    let out = `🤖 Boss, mere andar abhi **${list.length} functional agents** hain (live registry se — jitne naye add honge, yeh count khud badhega):\n\n`;
     out += '**✅ ON (' + on.length + '):**\n';
     out += '| # | Agent | Kaam |';
     out += '\n|---|-------|------|';

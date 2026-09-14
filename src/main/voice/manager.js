@@ -511,7 +511,11 @@ class VoiceManager {
   /**
    * Starts a Gemini Live API WebSocket session.
    */
-  async startLiveSession({ model, voice = 'Puck', systemInstruction = null, windowSender = null }) {
+  /* VOICE-APPLY BUG FIX: yahan KOI 'Puck' default NAHI — warna renderer ka
+     voice-less start({}) call saved voice ko override kar deta tha aur voice
+     change APPLY kabhi asar nahi karti thi. voice param sirf tab hota hai jab
+     caller ne SACH MEIN manga ho; warna vault ki saved voice hi jeetegi. */
+  async startLiveSession({ model, voice = null, systemInstruction = null, windowSender = null }) {
     // Phase 5: inject memory into the Live session's system instruction so
     // realtime voice conversation bhi yaad-dasht ke sath hoti hai.
     try {

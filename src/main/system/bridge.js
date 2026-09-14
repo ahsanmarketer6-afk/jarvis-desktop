@@ -244,8 +244,9 @@ Start-Sleep -Milliseconds 250
 Start-Sleep -Milliseconds $WaitMs
 "SENT=true"`,
 
-  /* UI Automation: window ka text BINA focus/clipboard ke parhna (unsaved windows
-     bhi!) aur likhna ("notepad me yeh likh do"). Ghost-read/focus-steal dono khatam. */
+/* UI Automation: window ka text BINA focus/clipboard ke parhna (unsaved windows
+   bhi!) aur likhna ("notepad me yeh likh do"). Ghost-read/focus-steal dono khatam.
+   NOTE: script ke andar sirf PS-style (#) comments — JS block comments PS ko todte hain. */
   uiaread: `param([string]$Title = '')
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
@@ -257,11 +258,13 @@ $editC = New-Object System.Windows.Automation.PropertyCondition([System.Windows.
 $docC = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Document)
 $target = New-Object System.Windows.Automation.OrCondition($editC, $docC)
 foreach ($w in $windows) {
-  if ($Title -and $w.Current.Name -ne $Title) { continue }
+  # PARTIAL title match - user 'untitled' bole to 'Untitled - Notepad' bhi mile
+  # (exact -ne match par likha hua window kabhi nahi milti thi).
+  if ($Title -and ($w.Current.Name -notlike "*$Title*")) { continue }
   $edits = $w.FindAll([System.Windows.Automation.TreeScope]::Descendants, $target)
   foreach ($e in $edits) {
     try { $vp = $e.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern); $val = $vp.Current.Value; "WIN=" + $w.Current.Name; "TEXT=" + $val; exit 0 } catch { }
-    try { $tp = $e.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern); $val = $tp.DocumentRange.GetText(4000); "WIN=" + $w.Current.Name; "TEXT=" + $val; exit 0 } catch { }
+    try { $tp = $e.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern); $val = $tp.DocumentRange.GetText(8000); "WIN=" + $w.Current.Name; "TEXT=" + $val; exit 0 } catch { }
   }
 }
 "WIN="
@@ -350,13 +353,39 @@ $editC = New-Object System.Windows.Automation.PropertyCondition([System.Windows.
 $docC = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Document)
 $target = New-Object System.Windows.Automation.OrCondition($editC, $docC)
 foreach ($w in $windows) {
-  if ($Title -and $w.Current.Name -ne $Title) { continue }
+  # PARTIAL title match - 'untitled' se 'Untitled - Notepad' bhi match ho (FALSE-FAIL fix):
+  # pehle exact -ne tha jis wajah se user ke bole hue naam par window mil hi nahi thi.
+  if ($Title -and ($w.Current.Name -notlike "*$Title*")) { continue }
   $edits = $w.FindAll([System.Windows.Automation.TreeScope]::Descendants, $target)
   foreach ($e in $edits) {
     try { $vp = $e.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern); $vp.SetValue($Text); "OK=true"; "WIN=" + $w.Current.Name; exit 0 } catch { }
   }
 }
-"OK=false"`
+"OK=false"`,
+
+  /* WRITE VERIFY: likhe gaye text ko saari notepad windows ke editor text mein
+     dhoondo (title-based verify unreliable hai — write ke baad notepad title
+     '*<content> - Notepad' ho jata hai, purana title doosri khaali tab par reh
+     jata hai). Text-based = jhoota fail namumkin. */
+  uiaverify: `param([string]$Needle = '')
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+$root = [System.Windows.Automation.AutomationElement]::RootElement
+$clsCond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ClassNameProperty, 'Notepad')
+$windows = $root.FindAll([System.Windows.Automation.TreeScope]::Children, $clsCond)
+$editC = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Edit)
+$docC = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Document)
+$target = New-Object System.Windows.Automation.OrCondition($editC, $docC)
+foreach ($w in $windows) {
+  $edits = $w.FindAll([System.Windows.Automation.TreeScope]::Descendants, $target)
+  foreach ($e in $edits) {
+    $val = $null
+    try { $vp = $e.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern); $val = $vp.Current.Value } catch { }
+    if (-not $val) { try { $tp = $e.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern); $val = $tp.DocumentRange.GetText(8000) } catch { } }
+    if ($val -and $val -like "*$Needle*") { "FOUND=true"; "WIN=" + $w.Current.Name; exit 0 }
+  }
+}
+"FOUND=false"`
 };
 
 /* ── Confirmation plumbing (premium dialog in renderer) ───────────── */
@@ -948,6 +977,14 @@ async function uiaWriteWindow(title, text) {
   return { ok: kv.map.OK === 'true', window: kv.map.WIN || null };
 }
 
+/* Write ke baad verification: text ko kisi bhi notepad editor mein dhoondo
+   (title ke badalne ki wajah se title-based verify jhoota fail deta tha). */
+async function uiaVerifyText(needle) {
+  const r = await ps('uiaverify', { Needle: String(needle || '') }, 15000);
+  const kv = parseKV(r.stdout);
+  return { found: kv.map.FOUND === 'true', window: kv.map.WIN || null };
+}
+
 /* ALL visible windows of a process (EnumWindows) — Win11 notepad's many
    windows share ONE process, Get-Process truncates to a single title. */
 async function windowsAll(procName, className) {
@@ -986,6 +1023,6 @@ module.exports = {
   ps, SCRIPT_DIR,
   ramInfo, cpuInfo, hardwareInfo, disksInfo, batteryInfo, networkInfo, tempInfo, fullHardwareReport,
   desktopPath, listDrives, listDir, mkdirNested, writeTextFile, readTextFile, openPath, moveOrRename, listDesktop, organizeDesktop,
-  runningApps, windowsOf, windowsAll, notepadTabs, notepadActivateTab, resolveApp, startApp, closeApp, resolveRecentFile, activateWindow, sendKeys, uiaReadWindow, uiaWriteWindow,
+  runningApps, windowsOf, windowsAll, notepadTabs, notepadActivateTab, resolveApp, startApp, closeApp, resolveRecentFile, activateWindow, sendKeys, uiaReadWindow, uiaWriteWindow, uiaVerifyText,
   volume, brightness, screenshot, clipboard, clipboardSeq, power, recycleBin, lookupUninstall, verifyUninstalled
 };

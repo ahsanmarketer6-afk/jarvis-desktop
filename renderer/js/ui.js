@@ -1297,76 +1297,19 @@ function renderChat(container) {
 function renderAgents(container) {
   container.innerHTML = '';
 
-  const search = el('input', { class: 'input', placeholder: '🔍  Search agents… (name, category, kaam)' });
-  const catSel = el('select', { class: 'select' },
-    el('option', { value: '' }, 'ALL CATEGORIES'),
-    ...AGENT_CATEGORIES.map(c => el('option', { value: c }, c.toUpperCase() + ' (' + AGENTS.filter(a => a.cat === c).length + ')'))
-  );
-  const stSel = el('select', { class: 'select' },
-    el('option', { value: '' }, 'ALL STATUS'),
-    el('option', { value: 'active' }, 'ACTIVE'),
-    el('option', { value: 'idle' }, 'IDLE'),
-    el('option', { value: 'off' }, 'OFF')
-  );
+  /* UI CLEANUP: fake hardcoded AGENTS cards + TASK RUN HISTORY + SYSTEM ACTIONS
+     Log hata diye — is tab par SIRF real registered agents ke live cards hain
+     (registry se, naya agent add hote hi card khud aata hai) + totals strip. */
 
-  const grid = el('div', { class: 'agent-grid' });
-  const count = el('span', { class: 'muted' });
-
-  function statusOf(a) { return a.on ? (a.name === 'Screen Vision' ? 'idle' : 'active') : 'off'; }
-
-  function draw() {
-    const q = (search.value || '').toLowerCase();
-    const cat = catSel.value;
-    const st = stSel.value;
-    grid.innerHTML = '';
-    const list = AGENTS.filter(a =>
-      (!q || (a.name + a.cat + a.desc).toLowerCase().includes(q)) &&
-      (!cat || a.cat === cat) &&
-      (!st || statusOf(a) === st)
-    );
-    count.textContent = list.length + ' / ' + AGENTS.length + ' AGENTS';
-    list.forEach(a => {
-      const stBadge = { active: ['green', '● ACTIVE'], idle: ['amber', '◔ IDLE'], off: ['gray', '○ OFF'] }[statusOf(a)];
-      const toggle = el('div', { class: 'toggle' + (a.on ? ' on' : '') });
-      toggle.onclick = () => {
-        a.on = !a.on;
-        if (!a.on) {
-          toast('Yeh agent off hai — on karein phir yeh kaam ho sakta hai', true);
-          a._showMsg = true;
-        } else { a._showMsg = false; toast(a.name + ' activated'); }
-        draw();
-      };
-      const card = el('div', { class: 'agent-card' + (a.on ? '' : ' off') },
-        el('div', { class: 'agent-top' },
-          el('div', { class: 'agent-ic' }, a.ic),
-          el('div', { style: 'flex:1' },
-            el('div', { class: 'agent-name' }, a.name),
-            el('div', { class: 'agent-desc' }, a.desc)
-          ),
-          toggle
-        ),
-        el('div', { class: 'agent-row' },
-          el('span', { class: 'badge ' + stBadge[0] }, stBadge[1]),
-          el('span', { class: 'badge gray' }, a.cat.toUpperCase())
-        ),
-        a._showMsg ? el('div', { class: 'agent-off-msg' }, '⚠ Yeh agent off hai — on karein phir yeh kaam ho sakta hai') : null
-      );
-      grid.appendChild(card);
-    });
-  }
-  search.oninput = draw; catSel.onchange = draw; stSel.onchange = draw;
-  draw();
-
-  /* ── Phase 4: REAL framework agents + run history (live DB) ── */
   const fwGrid = el('div', { class: 'agent-grid' });
   const fwCount = el('span', { class: 'muted' }, 'loading…');
-  const histList = el('div', { class: 'run-history' });
   const statRow = el('div', { class: 'filter-row', style: 'gap:8px' });
+
+  function statusOf(a) { return a.on ? (a.name === 'Screen Vision' ? 'idle' : 'active') : 'off'; }
 
   function drawFramework(data) {
     const agents = (data && data.agents) || [];
     const stats = (data && data.stats) || { totals: {}, byAgent: [] };
-    const history = (data && data.history) || [];
     fwGrid.innerHTML = '';
     fwCount.textContent = agents.length + ' REGISTERED AGENTS';
 
@@ -1377,7 +1320,7 @@ function renderAgents(container) {
       statRow.append(el('span', { class: 'badge ' + cls }, `${label}: ${n}`));
     });
 
-    // Agent cards (real registry) — Phase 6: REAL-TIME TOGGLES (DB-persisted, instant)
+    // Agent cards (real registry) — REAL-TIME TOGGLES (DB-persisted, instant)
     const perAgent = {};
     (stats.byAgent || []).forEach(s => { perAgent[s.agent] = s; });
     agents.forEach(a => {
@@ -1396,7 +1339,7 @@ function renderAgents(container) {
       const card = el('div', { class: 'agent-card' + (isOn ? '' : ' off') },
         el('div', { class: 'agent-top' },
           el('div', { class: 'agent-ic' }, '◈'),
-          el('div', { style: 'flex:1' },
+          el('div', { style: 'flex:1;min-width:0' },
             el('div', { class: 'agent-name' }, a.name),
             el('div', { class: 'agent-desc' }, a.description)
           ),
@@ -1410,89 +1353,28 @@ function renderAgents(container) {
       );
       fwGrid.appendChild(card);
     });
-
-    // Run history with expandable steps
-    histList.innerHTML = '';
-    if (!history.length) {
-      histList.appendChild(el('div', { class: 'empty' },
-        el('div', { class: 'e-ic' }, '☰'),
-        el('div', { class: 'e-tx' }, 'NO TASK RUNS YET'),
-        el('div', { class: 'muted' }, 'Chat mein complex task likhein — run history yahan aayegi')
-      ));
-    }
-    history.forEach(r => {
-      const cls = { succeeded: 'green', failed: 'red', cancelled: 'amber', running: 'gray' }[r.status] || 'gray';
-      const stepsBox = el('div', { style: 'display:none;padding:6px 0 2px 14px' });
-      (r.steps || []).forEach(s => {
-        const sCls = { succeeded: 'green', failed: 'red', skipped: 'amber', running: 'gray' }[s.status] || 'gray';
-        stepsBox.append(el('div', { class: 'muted', style: 'font-size:10px;margin:2px 0' },
-          `${s.status === 'succeeded' ? '✓' : s.status === 'failed' ? '✗' : '·'} #${s.step_index} ${s.agent} (${s.duration_ms || 0}ms)${s.error ? ' — ' + s.error.slice(0, 80) : ''}`));
-      });
-      const expander = el('div', { class: 'conn-card', style: 'cursor:pointer' },
-        el('div', { class: 'conn-info' },
-          el('div', { class: 'conn-name', style: 'font-size:11px' }, String(r.request || '').slice(0, 70)),
-          el('div', { class: 'conn-sub' }, `#${r.id} · ${r.classification || '?'} · ${r.source} · ${r.duration_ms || 0}ms`)),
-        el('span', { class: 'badge ' + cls }, r.status.toUpperCase()));
-      expander.onclick = () => { stepsBox.style.display = stepsBox.style.display === 'none' ? 'block' : 'none'; };
-      histList.append(expander, stepsBox);
-    });
   }
 
   async function refreshFramework() {
     try {
-      const [agents, stats, history] = await Promise.all([
-        window.jarvis.orch.agents(), window.jarvis.orch.stats(), window.jarvis.orch.history(30)
+      const [agents, stats] = await Promise.all([
+        window.jarvis.orch.agents(), window.jarvis.orch.stats()
       ]);
-      drawFramework({ agents, stats, history });
+      drawFramework({ agents, stats });
     } catch (e) {
       fwCount.textContent = 'framework bridge unavailable';
     }
   }
   refreshFramework();
 
-  /* ── Phase 6: SYSTEM ACTIONS LOG (verified actions audit trail) ── */
-  const sysList = el('div', { class: 'run-history' }, el('div', { class: 'muted', style: 'font-size:11px' }, 'loading…'));
-  (async () => {
-    try {
-      const rows = await window.jarvis.orch.systemActions({ limit: 20 });
-      sysList.innerHTML = '';
-      if (!rows.length) { sysList.append(el('div', { class: 'muted', style: 'font-size:11px' }, 'Koi system action abhi tak nahi hua — Jarvis se kaho "desktop pe folder banao".')); return; }
-      rows.forEach(r => {
-        const vBadge = r.verified ? el('span', { class: 'badge green' }, '✓ VERIFIED') : el('span', { class: 'badge amber' }, '○ UNVERIFIED');
-        const sBadge = el('span', { class: 'badge ' + (r.status === 'success' ? 'green' : r.status === 'failed' ? 'red' : 'amber') }, (r.status || '').toUpperCase());
-        sysList.append(el('div', { class: 'conn-card' },
-          el('div', { class: 'conn-info' },
-            el('div', { class: 'conn-name', style: 'font-size:11px' }, `${r.agent} · ${r.action_type}`),
-            el('div', { class: 'conn-sub' }, `${String(r.target || '—').slice(0, 70)} · ${r.created_at}${r.latency_ms ? ' · ' + r.latency_ms + 'ms' : ''}`)),
-          el('span', { style: 'display:flex;gap:4px' }, vBadge, sBadge)));
-      });
-    } catch (e) { sysList.innerHTML = ''; sysList.append(el('div', { class: 'muted', style: 'font-size:11px' }, 'system actions unavailable: ' + e.message)); }
-  })();
-
   container.append(
     el('div', { class: 'panel' },
       el('div', { class: 'panel-head' },
-        el('div', { class: 'panel-title' }, el('span', { class: 'pt-ic' }, '◈'), 'ORCHESTRATOR — LIVE FRAMEWORK'),
+        el('div', { class: 'panel-title' }, el('span', { class: 'pt-ic' }, '◈'), 'LIVE AGENT REGISTRY'),
         fwCount
       ),
       statRow,
-      fwGrid,
-      el('div', { class: 'panel-head', style: 'margin-top:14px' },
-        el('div', { class: 'panel-title' }, el('span', { class: 'pt-ic' }, '☰'), 'TASK RUN HISTORY'),
-        el('span', { class: 'muted', style: 'font-size:10px' }, 'click to expand steps')),
-      histList,
-      el('div', { class: 'panel-head', style: 'margin-top:14px' },
-        el('div', { class: 'panel-title' }, el('span', { class: 'pt-ic' }, '▣'), 'SYSTEM ACTIONS LOG (PHASE 6)'),
-        el('span', { class: 'muted', style: 'font-size:10px' }, 'every real action + verify status')),
-      sysList
-    ),
-    el('div', { class: 'panel' },
-      el('div', { class: 'panel-head' },
-        el('div', { class: 'panel-title' }, el('span', { class: 'pt-ic' }, '▣'), 'AGENT REGISTRY'),
-        count
-      ),
-      el('div', { class: 'filter-row' }, search, catSel, stSel),
-      grid
+      fwGrid
     )
   );
 }

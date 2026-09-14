@@ -228,6 +228,13 @@ class BrainManager {
   async chat(messages, options = {}, onChunk = null, onKeySwitch = null) {
     const availableKeys = db.getActiveApiKeys();
 
+    /* TIME AWARENESS: har LLM call ko laptop ki system clock ka live time/date
+       milta hai — "kya time hua hai?" ka jawab foran, bina tool ke. Model ko
+       kabhi 'mere paas time ka access nahi' nahi bolna parega. */
+    const now = new Date();
+    const timeBlock = `[SYSTEM CONTEXT — abhi is laptop par: ${now.toLocaleTimeString('en-PK', { hour: '2-digit', minute: '2-digit', hour12: true })}, ${now.toLocaleDateString('en-PK', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}, timezone ${Intl.DateTimeFormat().resolvedOptions().timeZone || 'local'}. User time/date pooche to YEHI batao.]`;
+    const withTime = [{ role: 'system', content: timeBlock }, ...messages];
+
     if (!availableKeys || availableKeys.length === 0) {
       throw new Error('No active or valid Brain API key configured. Please configure an LLM key in Brain API tab.');
     }
@@ -248,7 +255,7 @@ class BrainManager {
       }
 
       try {
-        const result = await adapter.chat(keyRecord.raw_key, model, messages, {
+        const result = await adapter.chat(keyRecord.raw_key, model, withTime, {
           stream: options.stream !== false,
           onChunk: (chunk) => {
             if (typeof onChunk === 'function') onChunk(chunk);

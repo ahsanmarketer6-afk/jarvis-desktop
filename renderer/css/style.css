@@ -353,6 +353,9 @@ html, body {
   transition: all .15s ease; white-space: nowrap;
 }
 .btn:hover { border-color: #2c332c; color: var(--text); }
+.btn.btn-primary { background: linear-gradient(135deg, #17a97a, var(--mint)); color: #04150d; border: none; }
+.btn.btn-danger { background: rgba(255,92,92,0.08); border-color: var(--red-dim); color: #f0b9b9; }
+.btn.btn-danger:hover { background: rgba(255,92,92,0.16); }
 .btn.primary {
   background: linear-gradient(135deg, #17a97a, var(--mint));
   color: #04150d; border: none;
@@ -393,6 +396,7 @@ html, body {
   display: inline-flex; align-items: center; gap: 5px;
   font-size: 8.5px; font-weight: 700; letter-spacing: 1.2px;
   padding: 3px 8px; border-radius: 5px; border: 1px solid;
+  white-space: nowrap; flex-shrink: 0;   /* 'LIVE ON' kabhi 2 lines mein na tootay (UI fix) */
 }
 .badge.green { color: var(--mint); border-color: rgba(46,230,168,0.28); background: rgba(46,230,168,0.045); }
 .badge.red { color: var(--red); border-color: var(--red-dim); background: rgba(255,92,92,0.05); }
@@ -434,7 +438,7 @@ html, body {
 .agent-card.off .agent-ic { color: var(--muted2); }
 .agent-name { font-size: 12.5px; font-weight: 700; color: #e6eae7; letter-spacing: .4px; }
 .agent-desc { font-size: 10px; color: var(--muted); line-height: 1.55; margin-top: 4px; }
-.agent-row { display: flex; align-items: center; justify-content: space-between; }
+.agent-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-start; }
 .agent-off-msg {
   font-size: 9.5px; color: var(--amber); background: rgba(255,184,77,0.05);
   border: 1px solid #57431c; border-radius: 7px; padding: 7px 9px; line-height: 1.5;
@@ -569,7 +573,7 @@ html, body {
 @keyframes modin { from { transform: translateY(10px); opacity: 0; } to { transform: none; opacity: 1; } }
 .modal-title { font-family: var(--font-display); font-size: 16px; font-weight: 700; letter-spacing: 3px; color: #eef2ef; margin-bottom: 4px; }
 .modal-sub { font-size: 9.5px; color: var(--muted); letter-spacing: 1px; margin-bottom: 16px; }
-.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; flex-wrap: wrap; }
 .form-row { margin-bottom: 12px; }
 .form-label { font-size: 8.5px; letter-spacing: 2px; color: var(--muted); margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
 .form-hint { font-size: 9px; color: var(--muted2); margin-top: 6px; line-height: 1.5; }

@@ -21,6 +21,13 @@ function fmtBytes(b) { return b > 1024 * 1024 ? (b / 1024 / 1024).toFixed(1) + '
 
 /* ─── Query declarations: the Live model calls these as tools ─────── */
 const QUERIES = {
+  async get_time() {
+    const now = new Date();
+    const t = now.toLocaleTimeString('en-PK', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true });
+    const d = now.toLocaleDateString('en-PK', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'local';
+    return `Laptop ki system clock se LIVE time: ${t}, ${d} (timezone: ${tz}).`;
+  },
   async get_ram() {
     const r = await bridge.ramInfo();
     const procs = r.topProcesses.slice(0, 8).map((p, i) => `${i + 1}. ${p.name} (${p.count}) — ${p.mb} MB`).join('; ');
@@ -157,23 +164,70 @@ const ACTIONS = {
   async close_app({ name }) {
     const t0 = Date.now();
     const proc = String(name || '').replace(/\.exe$/i, '');
-    const wins = await bridge.windowsOf(proc);
+    const wins = await bridge.windowsAll(proc, null);
     if (!wins.length) { logAction('app-control', 'close.app', proc, null, false, 'failed', Date.now() - t0); return `${name} chal hi nahi rahi — band karne ki zaroorat nahi.`; }
+
+    /* SAFE-CLOSE RULE (har app par): band karne se PEHLE unsaved data dhoondo —
+       mila to Jarvis KHUD bolega (ye tool-result text uska moon se niklega):
+       content kya hai + save karein ya nahi. Modal convenience hai, lekin
+       bina bataye kabhi band nahi hoga. */
+    let content = null;
+    if (/^notepad$/i.test(proc)) {
+      try {
+        const win = wins[0];
+        const fileTitle = String(win.title).replace(/\s*[-–]\s*Notepad.*$/i, '').trim();
+        const recent = await bridge.resolveRecentFile(fileTitle);
+        if (recent) { const r = await bridge.readTextFile(recent); if (r && r.content != null && String(r.content).trim()) content = r.content; }
+        if (!content) { const uia = await bridge.uiaReadWindow(win.title); if (uia.ok && String(uia.text || '').trim()) content = uia.text; }
+      } catch (e) { /* read fail = content unknown, confirm phir bhi hoga */ }
+    }
+
+    if (content && String(content).trim()) {
+      const conf = await bridge.requestConfirmation({
+        kind: 'safe-close', title: 'Unsaved data — Save karein?', appName: proc,
+        detail: `**${proc}** mein UNSAVED content hai:\n\n---\n${String(content).slice(0, 400)}\n---\n\nBand karne se ye data chala jayega.`,
+        buttons: ['save kar ke band karo', 'bina save band karo', 'rehne do']
+      });
+      if (conf.action === 'rehne do') {
+        logAction('app-control', 'close.cancelled', proc, { byUser: 'rehne do' }, true, 'cancelled', Date.now() - t0);
+        return `Theek hai Boss, maine ${proc} band NAHI kiya — aapne kaha rehne do. Aapka data waise ka waisa safe hai.`;
+      }
+      if (conf.action === 'save kar ke band karo') {
+        const d = await bridge.desktopPath();
+        const p = d + (d.endsWith('\\') ? '' : '\\') + `${proc}-saved-${Date.now()}.txt`;
+        const w = await bridge.writeTextFile(p, String(content));
+        const rf = await bridge.closeApp(proc, { force: true });
+        logAction('app-control', 'close.saved', p, { savedBytes: w.size, left: rf.left }, w.verified && rf.left === 0, w.verified ? 'success' : 'failed', Date.now() - t0);
+        return w.verified
+          ? `Pehle save kiya: ${p} (verify ✓) — phir ${proc} band kar diya, ab 0 process bache.`
+          : `Save fail hua to maine band NAHI kiya (data loss nahi karta) — ${proc} abhi khuli hai. Koi doosri location batao.`;
+      }
+      /* 'bina save band karo' — user ne SAAF kaha, ab force-close (app ka apna
+         save-dialog bhi bypass, kyunke decision ho chuka) */
+      const rf = await bridge.closeApp(proc, { force: true });
+      logAction('app-control', 'close.nosave', proc, { left: rf.left }, rf.left === 0, rf.left === 0 ? 'success' : 'failed', Date.now() - t0);
+      return rf.left === 0
+        ? `${proc} bina save band kar diya — aapke kehne par, verify: 0 process bache.`
+        : `${proc} ki ${rf.left} process abhi bhi zinda hai — honest report, dobara try karein.`;
+    }
+
+    /* No unsaved data detected → graceful close; AGAR process atka (app ka apna
+       dialog) to voice confirm — aur FALSE-SUCCESS namumkin: LEFT process-count
+       hi sach hai (MainWindowTitle nahi — dialog upar hone par wo khali ho jata hai). */
     const r = await bridge.closeApp(proc, { force: false });
-    await new Promise(s => setTimeout(s, 800));
-    const left = await bridge.windowsOf(proc);
-    if (left.length) {
-      /* graceful close nahi hui — unsaved dialog ya force chahiye. Voice confirm. */
-      const conf = await bridge.requestConfirmation({ kind: 'force-close', title: 'Force Close?', appName: proc, detail: `**${proc}** gracefully band nahi hui (shayad unsaved data/dialog). Force close karun?`, buttons: ['force band karo', 'rehne do'] });
+    await new Promise(s => setTimeout(s, 1200));
+    if (r.left > 0) {
+      const conf = await bridge.requestConfirmation({ kind: 'force-close', title: 'Force Close?', appName: proc, detail: `**${proc}** gracefully band nahi hui (shayad koi dialog khula hai). Force close karun?`, buttons: ['force band karo', 'rehne do'] });
       if (conf.action === 'force band karo') {
         const rf = await bridge.closeApp(proc, { force: true });
         logAction('app-control', 'close.force', proc, { left: rf.left }, rf.left === 0, rf.left === 0 ? 'success' : 'failed', Date.now() - t0);
-        return rf.left === 0 ? `${proc} force band kar diya — verify: 0 windows left.` : `${proc} ki ${rf.left} window abhi bhi zinda hai — honest report.`;
+        return rf.left === 0 ? `${proc} force band kar diya — verify: 0 process bache.` : `${proc} ki ${rf.left} process abhi bhi zinda hai — honest report.`;
       }
-      return `Theek hai, ${proc} khuli chhodi — aapka data safe hai.`;
+      logAction('app-control', 'close.cancelled', proc, { byUser: 'rehne do', stuck: r.stuck }, true, 'cancelled', Date.now() - t0);
+      return `Theek hai, ${proc} khuli chhodi — aapne kaha rehne do.`;
     }
     logAction('app-control', 'close.app', proc, { left: 0 }, true, 'success', Date.now() - t0);
-    return `${proc} band ho gayi — verify kiya, koi window nahi bachi.`;
+    return `${proc} band ho gayi — verify kiya, 0 process bache.`;
   },
   async create_folder({ name, location }) {
     const t0 = Date.now();
@@ -244,11 +298,19 @@ const ACTIONS = {
     } else if (wins.length === 1) win = wins[0];
     else return `Notepad mein ${wins.length} windows hain (${wins.map(w => w.title).join(' | ')}). Kis mein likhna hai, naam batao.`;
     const r = await bridge.uiaWriteWindow(win.title, String(text || ''));
-    /* RULE 7: verify — wapas parh kar dekho ke likha WAAKAI gaya */
+    /* RULE 7: verify — TEXT-based (title-based verify jhoota fail tha: write ke
+       baad notepad title '*<content> - Notepad' ho jata hai aur purane title par
+       khaali doosri tab mil jati thi). Likha hua text kisi bhi editor mein milna
+       chahiye — mil gaya to pakka likha gaya. */
     let verified = false;
-    if (r.ok) { const chk = await bridge.uiaReadWindow(win.title); verified = chk.ok && String(chk.text || '').slice(0, 200) === String(text || '').slice(0, 200); }
-    logAction('app-control', 'write.notepad', win.title, { verified }, verified, verified ? 'success' : 'failed', Date.now() - t0);
-    return verified ? `Notepad window "${win.title}" mein likh diya aur verify bhi kar liya. (Ye editor text hai — save karna ho to bolo.)` : `Likha nahi ja saka (editor write nahi hua) — honest report.`;
+    const probe = String(text || '').trim().slice(0, 80);
+    if (r.ok && probe) {
+      try { const chk = await bridge.uiaVerifyText(probe); verified = chk.found; } catch (e) { verified = false; }
+    }
+    logAction('app-control', 'write.notepad', win.title, { verified, writeOk: !!r.ok }, verified, (verified || r.ok) ? 'success' : 'failed', Date.now() - t0);
+    if (verified) return `Notepad mein likh diya aur wapas parh kar verify bhi kar liya — text editor mein maujood hai. (Save karna ho to bolo.)`;
+    if (r.ok) return `Notepad "${win.title}" mein write ho gaya — lekin auto-verify nahi kar saka (editor read-back nahi deta). Aap dekh lein, likha hona chahiye; save karna ho to bolo.`;
+    return `Likha nahi ja saka (editor write nahi hua) — honest report.`;
   },
   async write_clipboard({ text }) {
     const t0 = Date.now();
@@ -295,6 +357,7 @@ const ACTIONS = {
 
 const DECLS = {
   functionDeclarations: [
+    { name: 'get_time', description: 'Abhi kitne baje hain / aaj kya tareekh hai ka sawal — laptop ki system clock se LIVE time aur date.' },
     { name: 'get_ram', description: 'User ka sawal: RAM kitni hai / kitni use ho rahi / kahan use ho rahi / kaise free karun. Live values return karta hai.' },
     { name: 'get_model', description: 'Laptop/PC ka exact model, CPU/GPU/OS detail ka sawal.' },
     { name: 'get_disks', description: 'Disks ka total/used/free space ka sawal.' },
