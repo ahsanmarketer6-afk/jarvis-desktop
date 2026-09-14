@@ -395,11 +395,13 @@ function renderChat(container) {
         if (idx !== -1) activeLiveSources.splice(idx, 1);
         if (activeLiveSources.length === 0 && chatState.state === 'speaking') {
           applyState('idle');
+          window.__liveSpeaking = false; // QA mirror
           statusLeft.textContent = 'Live voice active — bolo Boss';
         }
       };
 
       chatApplyState('speaking');
+      window.__liveSpeaking = true; // QA mirror
       setChatStatus('Jarvis is speaking (Gemini Live Dialog)…');
       const ib = chatInterruptBtn();
       if (ib) ib.style.display = 'inline-block';
@@ -420,6 +422,9 @@ function renderChat(container) {
 
     window.jarvis.voice.live.onText((data) => {
       if (data && data.text) {
+        // QA mirror: window-exposed transcript growth (CDP tests measure word-by-word)
+        if (!window.__liveT) window.__liveT = { u: '', j: '' };
+        if (data.isUser) window.__liveT.u += data.text; else window.__liveT.j += data.text;
         // Append or stream text to live transcript in Chat view
         const role = data.isUser ? 'user' : 'jarvis';
         const lastMsg = chatState.messages[chatState.messages.length - 1];
@@ -428,14 +433,19 @@ function renderChat(container) {
         } else {
           chatState.messages.push({ role, text: data.text, _live: true });
         }
-        // Phase 5 fix: live transcript bhi SQLite mein (turn-complete par hi save hota hai via debounce below)
-        clearTimeout(chatState._liveSaveT);
-        chatState._liveSaveT = setTimeout(() => {
-          if (chatState.messages.length && window.jarvis?.chat?.insert) {
-            const lm = chatState.messages[chatState.messages.length - 1];
-            if (lm && lm.text) window.jarvis.chat.insert(lm.role === 'jarvis' ? 'assistant' : 'user', lm.text, 'live').catch(() => {});
-          }
-        }, 1500);
+        // WORD-BY-WORD persistence: har naya chunk ka SIRF naya hissa turant DB
+        // mein jata hai (per-role cursor, retry-safe). Pehle debounce 1500ms tha —
+        // user ke bolte waqt kuch bhi save nahi hota tha; ab jo bola ja chuka hai
+        // woh DB mein hai (crash/force-kill par bhi). Final turn-complete par
+        // cursors reset ho jate hain (onTurnComplete handler).
+        if (!chatState._liveDbSeen) chatState._liveDbSeen = { user: 0, jarvis: 0 };
+        const seenKey = role === 'jarvis' ? 'jarvis' : 'user';
+        const fullText = (lastMsg && lastMsg._live && lastMsg.role === role) ? lastMsg.text : data.text;
+        if (window.jarvis?.chat?.insert && fullText.length > (chatState._liveDbSeen[seenKey] || 0)) {
+          const freshSlice = fullText.slice(chatState._liveDbSeen[seenKey] || 0);
+          chatState._liveDbSeen[seenKey] = fullText.length;
+          window.jarvis.chat.insert(role === 'jarvis' ? 'assistant' : 'user', freshSlice, 'live').catch(() => {});
+        }
         chatRenderMsgs();
       }
     });
@@ -449,6 +459,8 @@ function renderChat(container) {
 
     window.jarvis.voice.live.onTurnComplete(() => {
       console.log('[Live Mode] Turn complete');
+      // Word-by-word save cursors reset — agli turn fresh se save kare
+      chatState._liveDbSeen = { user: 0, jarvis: 0 };
       if (activeLiveSources.length === 0) {
         chatApplyState('idle');
         setChatStatus('⚡ Live voice active — bolo Boss');
@@ -603,6 +615,7 @@ function renderChat(container) {
 
       liveActive = true;
       chatState.recording = true;
+      window.__micChunkCount = 0; // QA counter fresh start
       const mb = document.getElementById('mic-master');
       if (mb) mb.classList.add('mic-on');
       chatApplyState('listening');

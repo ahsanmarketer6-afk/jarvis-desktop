@@ -192,6 +192,12 @@ if (Test-Path -LiteralPath $Path) { "SIZE=" + (Get-Item -LiteralPath $Path).Leng
 if ($Mode -eq 'set') { Set-Clipboard -Value $Text -ErrorAction Stop; "OK=set" }
 else { try { "CLIP=" + (Get-Clipboard -Raw) } catch { "CLIP=" } }`,
 
+  /* Clipboard sequence number: ghost-read detection (user ka purana clipboard
+     content naye read jaisa dikhta tha — Rule 1 violation). Seq change na ho
+     to copy fail hua => content trust NAHI karna. */
+  clipseq: `Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class CSN { [DllImport("user32.dll")] public static extern uint GetClipboardSequenceNumber(); }'
+"SEQ=$([CSN]::GetClipboardSequenceNumber())"`,
+
   power: `param([string]$Action = 'lock')
 switch ($Action) {
   'lock'     { rundll32.exe user32.dll,LockWorkStation; "OK=lock" }
@@ -236,7 +242,121 @@ Add-Type -AssemblyName System.Windows.Forms
 Start-Sleep -Milliseconds 250
 [System.Windows.Forms.SendKeys]::SendWait($Keys)
 Start-Sleep -Milliseconds $WaitMs
-"SENT=true"`
+"SENT=true"`,
+
+  /* UI Automation: window ka text BINA focus/clipboard ke parhna (unsaved windows
+     bhi!) aur likhna ("notepad me yeh likh do"). Ghost-read/focus-steal dono khatam. */
+  uiaread: `param([string]$Title = '')
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+$root = [System.Windows.Automation.AutomationElement]::RootElement
+$clsCond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ClassNameProperty, 'Notepad')
+$windows = $root.FindAll([System.Windows.Automation.TreeScope]::Children, $clsCond)
+/* Win11 notepad editor = ControlType.Document (RichEditD2DPT); classic = Edit. Dono dhoondo. */
+$editC = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Edit)
+$docC = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Document)
+$target = New-Object System.Windows.Automation.OrCondition($editC, $docC)
+foreach ($w in $windows) {
+  if ($Title -and $w.Current.Name -ne $Title) { continue }
+  $edits = $w.FindAll([System.Windows.Automation.TreeScope]::Descendants, $target)
+  foreach ($e in $edits) {
+    try { $vp = $e.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern); $val = $vp.Current.Value; "WIN=" + $w.Current.Name; "TEXT=" + $val; exit 0 } catch { }
+    try { $tp = $e.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern); $val = $tp.DocumentRange.GetText(4000); "WIN=" + $w.Current.Name; "TEXT=" + $val; exit 0 } catch { }
+  }
+}
+"WIN="
+"TEXT="`,
+
+  /* Win11 notepad: SAARI windows ek process mein hoti hain — Get-Process
+     MainWindowTitle sirf ek title deta tha ("kitne tabs" ka ghalat jawab).
+     EnumWindows se har visible top-level window (class filter ke sath) milti hai. */
+  winsall: `param([string]$Proc = '', [string]$Class = '')
+Add-Type -TypeDefinition 'using System; using System.Text; using System.Collections.Generic; using System.Runtime.InteropServices; public class WE {
+  public delegate bool EnumProc(IntPtr h, IntPtr l);
+  public static List<string> Found = new List<string>();
+  public static HashSet<uint> Pids = new HashSet<uint>();
+  public static bool UsePids = false;
+  public static string ClassF = null;
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  public static bool Cb(IntPtr h, IntPtr l) {
+    try {
+      if (!IsWindowVisible(h)) return true;
+      var sb = new StringBuilder(512);
+      GetWindowText(h, sb, 512);
+      var t = sb.ToString();
+      if (t.Length == 0) return true;
+      var cb2 = new StringBuilder(256);
+      GetClassName(h, cb2, 256);
+      var cls = cb2.ToString();
+      if (ClassF != null && cls != ClassF) return true;
+      uint wpid; GetWindowThreadProcessId(h, out wpid);
+      if (UsePids && !Pids.Contains(wpid)) return true;
+      Found.Add("WIN=" + wpid + "|" + cls + "|" + t);
+    } catch { }
+    return true;
+  }
+}'
+if ($Proc) { [WE]::UsePids = $true; Get-Process -Name $Proc -ErrorAction SilentlyContinue | ForEach-Object { [void][WE]::Pids.Add([uint32]$_.Id) } }
+if ($Class) { [WE]::ClassF = $Class }
+$d = [System.Delegate]::CreateDelegate([WE+EnumProc], $null, [WE].GetMethod('Cb'))
+$null = [WE]::EnumWindows($d, [IntPtr]::Zero)
+foreach ($f in [WE]::Found) { $f }`,
+
+  /* Notepad ke andar ke TAB items (Win11 tabbed UI) — UIA TabItem names.
+     Sirf WOHI groups jin ka naam REAL window title se match karta hai (ghost filter). */
+  notepadtabs: `Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+$root = [System.Windows.Automation.AutomationElement]::RootElement
+$clsCond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ClassNameProperty, 'Notepad')
+$windows = $root.FindAll([System.Windows.Automation.TreeScope]::Children, $clsCond)
+$tabC = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::TabItem)
+foreach ($w in $windows) {
+  $tabs = $w.FindAll([System.Windows.Automation.TreeScope]::Descendants, $tabC)
+  "WTAB=" + $w.Current.Name + "|" + $tabs.Count
+  foreach ($t in $tabs) { "TAB=" + $t.Current.Name }
+}
+if ($windows.Count -eq 0) { "WTAB=|0" }`,
+
+  /* Kisi ek TAB ko activate karo (Win11: saari files ek window ke tabs hain) —
+     SelectionItemPattern.Select() — bina mouse/focus steal ke. */
+  notepadactivatetab: `param([string]$Tab = '')
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+$root = [System.Windows.Automation.AutomationElement]::RootElement
+$clsCond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ClassNameProperty, 'Notepad')
+$windows = $root.FindAll([System.Windows.Automation.TreeScope]::Children, $clsCond)
+$tabC = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::TabItem)
+foreach ($w in $windows) {
+  $tabs = $w.FindAll([System.Windows.Automation.TreeScope]::Descendants, $tabC)
+  foreach ($t in $tabs) {
+    if ($Tab -and $t.Current.Name -like "*$Tab*") {
+      try { ($t.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)).Select(); "OK=true"; "TAB=" + $t.Current.Name; exit 0 } catch { }
+    }
+  }
+}
+"OK=false"`,
+
+  uiawrite: `param([string]$Title = '', [string]$Text = '')
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+$root = [System.Windows.Automation.AutomationElement]::RootElement
+$clsCond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ClassNameProperty, 'Notepad')
+$windows = $root.FindAll([System.Windows.Automation.TreeScope]::Children, $clsCond)
+$editC = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Edit)
+$docC = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Document)
+$target = New-Object System.Windows.Automation.OrCondition($editC, $docC)
+foreach ($w in $windows) {
+  if ($Title -and $w.Current.Name -ne $Title) { continue }
+  $edits = $w.FindAll([System.Windows.Automation.TreeScope]::Descendants, $target)
+  foreach ($e in $edits) {
+    try { $vp = $e.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern); $vp.SetValue($Text); "OK=true"; "WIN=" + $w.Current.Name; exit 0 } catch { }
+  }
+}
+"OK=false"`
 };
 
 /* ── Confirmation plumbing (premium dialog in renderer) ───────────── */
@@ -603,20 +723,40 @@ async function windowsOf(procName) {
 
 const _KNOWN_APPS = {
   notepad: ['C:\\Windows\\notepad.exe', 'C:\\Windows\\System32\\notepad.exe'],
-  calc: ['C:\\Windows\\System32\\calc.exe'],
+  /* calc.exe disk par ek STUB hai (exists) — pehle Store app URI, warna "Pick an app" dialog */
+  calc: ['shell:AppsFolder\\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App', 'C:\\Windows\\System32\\calc.exe'],
   mspaint: ['C:\\Windows\\System32\\mspaint.exe'],
   taskmanager: ['C:\\Windows\\System32\\Taskmgr.exe'],
   taskmgr: ['C:\\Windows\\System32\\Taskmgr.exe'],
   explorer: ['C:\\Windows\\explorer.exe'],
   cmd: ['C:\\Windows\\System32\\cmd.exe'],
-  powershell: ['C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe']
+  powershell: ['C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'],
+  /* Store-app aliases: Windows 10/11 ka "Calculator" ek Store (packaged) app hai —
+     calc.exe sirf ek stub hai jo bina file association ke start dialog khulta hai.
+     shell:AppsFolder canonical AUMIDs se deterministic launch hota hai. */
+  calculator: ['shell:AppsFolder\\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App'],
+  notepad_new: ['shell:AppsFolder\\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App'],
+  paint: ['shell:AppsFolder\\Microsoft.Paint_8wekyb3d8bbwe!App'],
+  mspaint: ['C:\\Windows\\System32\\mspaint.exe', 'shell:AppsFolder\\Microsoft.Paint_8wekyb3d8bbwe!App'],
+  camera: ['shell:AppsFolder\\Microsoft.WindowsCamera_8wekyb3d8bbwe!App'],
+  photos: ['shell:AppsFolder\\Microsoft.Windows.Photos_8wekyb3d8bbwe!App'],
+  settings: ['shell:AppsFolder\\windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel'],
+  snippingtool: ['shell:AppsFolder\\Microsoft.ScreenSketch_8wekyb3d8bbwe!SnipOutlineTool']
 };
 
 function findKnownApp(name) {
   const key = String(name || '').toLowerCase().replace(/\.exe$/, '').trim();
   for (const [k, paths] of Object.entries(_KNOWN_APPS)) {
-    if (k === key) { for (const p of paths) if (fs.existsSync(p)) return p; }
+    if (k === key) {
+      for (const p of paths) {
+        if (p.startsWith('shell:')) return p; // Store app — shell URI, fs check nahi hota
+        if (fs.existsSync(p)) return p;
+      }
+    }
   }
+  /* Urdu/Hinglish aliases — user bole "calculator kholo" ya "calculator app" */
+  const ALIAS = { 'calculator': 'calc', 'hisab': 'calc', 'hisaab': 'calc', 'paint': 'mspaint', 'drawing': 'mspaint', 'note': 'notepad', 'notes': 'notepad' };
+  if (ALIAS[key] && ALIAS[key] !== key) return findKnownApp(ALIAS[key]);
   const local = path.join(process.env.LOCALAPPDATA || '', 'Programs');
   const guesses = [
     path.join(local, 'Microsoft VS Code', 'Code.exe'),
@@ -654,8 +794,14 @@ async function startApp(resolved) {
   _cache.delete('apps'); // live snapshot — cached list would false-verify
   const before = new Set((await runningApps()).visibleApps.map(v => v.pid));
   const { spawn: sp } = require('child_process');
-  const child = sp('cmd.exe', ['/c', 'start', '', resolved.path], { windowsHide: true, detached: true, stdio: 'ignore' });
-  try { child.unref(); } catch (e) { /* noop */ }
+  if (String(resolved.path).startsWith('shell:')) {
+    /* Store app: explorer.exe shell:URI — deterministic, no association dialog */
+    const c2 = sp('explorer.exe', [resolved.path], { detached: true, stdio: 'ignore' });
+    try { c2.unref(); } catch (e) { /* noop */ }
+  } else {
+    const child = sp('cmd.exe', ['/c', 'start', '', resolved.path], { windowsHide: true, detached: true, stdio: 'ignore' });
+    try { child.unref(); } catch (e) { /* noop */ }
+  }
   await new Promise(res => setTimeout(res, 2500));
   _cache.delete('apps'); // fresh read for the AFTER snapshot
   const after = await runningApps();
@@ -664,7 +810,27 @@ async function startApp(resolved) {
      process mein khol dete hain — koi naya pid nahi banta. Verify = naya window YA
      us app ka koi bhi visible window (basename match). Warna jhoota fail report jata. */
   const baseExe = path.basename(resolved.path).replace(/\.lnk$/i, '').replace(/\.exe$/i, '').toLowerCase();
-  const matching = after.visibleApps.filter(v => String(v.name).toLowerCase() === baseExe || String(v.name).toLowerCase() === baseExe.replace(/[^a-z0-9]/g, ''));
+  let matching = after.visibleApps.filter(v => String(v.name).toLowerCase() === baseExe || String(v.name).toLowerCase() === baseExe.replace(/[^a-z0-9]/g, ''));
+  /* STORE APPS: process name WindowsCalculator ka alag hota hai (CalculatorApp/
+     ApplicationFrameHost) — basename match kabhi nahi lagta. Shell: URI ke AUMID
+     se display name nikal kar window TITLE se verify karo (Calculator window ka
+     title hi "Calculator" hota hai). Store app cold-start lamba ho sakta hai
+     (2.5s kam para tha) — 6.5s tak poll karo. */
+  let shellTitleHint = null;
+  if (String(resolved.path).startsWith('shell:AppsFolder\\Microsoft.')) {
+    const seg = String(resolved.path).split('\\').pop() || '';
+    shellTitleHint = seg.replace(/^Microsoft\.(Windows\.)?/i, '').replace(/_.*$/, '').replace(/^Windows/, '');
+  }
+  if (shellTitleHint) {
+    const deadline = Date.now() + 6500;
+    while (Date.now() < deadline && matching.length === 0) {
+      _cache.delete('apps');
+      const snap = await runningApps();
+      matching = snap.visibleApps.filter(v => String(v.title).toLowerCase().includes(shellTitleHint.toLowerCase()));
+      if (matching.length) { newVisible.push(...matching); break; }
+      await new Promise(res => setTimeout(res, 700));
+    }
+  }
   return { started: true, newWindows: newVisible, matchingWindows: matching, verified: newVisible.length > 0 || matching.length > 0, mergedIntoExisting: newVisible.length === 0 && matching.length > 0, path: resolved.path, source: resolved.source };
 }
 
@@ -717,6 +883,11 @@ async function screenshot(filePath, mode = 'screen') {
   return { ok: verified, verified, size, path: filePath };
 }
 
+async function clipboardSeq() {
+  const r = await ps('clipseq', {}, 10000);
+  return +(parseKV(r.stdout).map.SEQ || 0);
+}
+
 async function clipboard(mode, text) {
   const r = await ps('clipboard', { Mode: mode, Text: text || '' }, 10000);
   const kv = parseKV(r.stdout);
@@ -763,12 +934,58 @@ async function sendKeys(keys, waitMs) {
   return parseKV(r.stdout).map.SENT === 'true';
 }
 
+/* UIA window text read/write — BINA focus ke (unsaved notepad windows included).
+   Returns { ok, window, text } / { ok, window } — honest when not found. */
+async function uiaReadWindow(title) {
+  const r = await ps('uiaread', { Title: title || '' }, 15000);
+  const kv = parseKV(r.stdout);
+  return { ok: !!(kv.map.WIN && kv.map.TEXT != null), window: kv.map.WIN || null, text: kv.map.TEXT != null ? kv.map.TEXT : null };
+}
+
+async function uiaWriteWindow(title, text) {
+  const r = await ps('uiawrite', { Title: title || '', Text: String(text || '') }, 15000);
+  const kv = parseKV(r.stdout);
+  return { ok: kv.map.OK === 'true', window: kv.map.WIN || null };
+}
+
+/* ALL visible windows of a process (EnumWindows) — Win11 notepad's many
+   windows share ONE process, Get-Process truncates to a single title. */
+async function windowsAll(procName, className) {
+  const params = {};
+  if (procName) params.Proc = procName;
+  if (className) params.Class = className;
+  const r = await ps('winsall', params, 15000);
+  return parseKV(r.stdout).lines.filter(l => l.startsWith('WIN=')).map(l => {
+    const parts = l.slice(4).split('|');
+    return { pid: +parts[0], cls: parts[1] || '', title: parts.slice(2).join('|') || '' };
+  });
+}
+
+/* Notepad tab items (Win11 tabbed UI) — per-window tab names via UIA */
+async function notepadTabs() {
+  const r = await ps('notepadtabs', {}, 15000);
+  const out = [];
+  let cur = null;
+  for (const l of parseKV(r.stdout).lines) {
+    if (l.startsWith('WTAB=')) { const [win, count] = l.slice(5).split('|'); cur = { window: win, tabCount: +count || 0, tabs: [] }; out.push(cur); }
+    else if (l.startsWith('TAB=') && cur) cur.tabs.push(l.slice(4));
+  }
+  return out;
+}
+
+/* Ek TAB activate karo (Win11 notepad — saari files ek window group mein) */
+async function notepadActivateTab(tabName) {
+  const r = await ps('notepadactivatetab', { Tab: tabName || '' }, 15000);
+  const kv = parseKV(r.stdout);
+  return { ok: kv.map.OK === 'true', tab: kv.map.TAB || null };
+}
+
 /* ══════════════════ Exports ══════════════════ */
 module.exports = {
   init, requestConfirmation, resolveConfirmation,
   ps, SCRIPT_DIR,
   ramInfo, cpuInfo, hardwareInfo, disksInfo, batteryInfo, networkInfo, tempInfo, fullHardwareReport,
   desktopPath, listDrives, listDir, mkdirNested, writeTextFile, readTextFile, openPath, moveOrRename, listDesktop, organizeDesktop,
-  runningApps, windowsOf, resolveApp, startApp, closeApp, resolveRecentFile, activateWindow, sendKeys,
-  volume, brightness, screenshot, clipboard, power, recycleBin, lookupUninstall, verifyUninstalled
+  runningApps, windowsOf, windowsAll, notepadTabs, notepadActivateTab, resolveApp, startApp, closeApp, resolveRecentFile, activateWindow, sendKeys, uiaReadWindow, uiaWriteWindow,
+  volume, brightness, screenshot, clipboard, clipboardSeq, power, recycleBin, lookupUninstall, verifyUninstalled
 };

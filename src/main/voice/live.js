@@ -170,7 +170,7 @@ class GeminiLiveSessionManager extends EventEmitter {
         this.retryCount = 0;
 
         const defaultPrompt = systemInstruction || 'You are JARVIS, an ultra-smart, helpful, witty AI operating layer. Speak naturally, concisely, and conversationally in Roman Urdu and English. Address the user respectfully as Boss.';
-        const withTools = defaultPrompt + '\n\nSYSTEM ACTIONS — IMPORTANT: Aapke paas system-control tools hain (open_app, close_app, create_folder, create_file, open_path, set_volume, take_screenshot, lock_pc, get_ram, get_model, get_disks, get_battery, get_network, get_cpu, get_running_apps, get_desktop, list_folder, read_clipboard, write_clipboard, list_recycle_bin, empty_recycle_bin, uninstall_app, get_temperature, get_volume, volume_mute). JAB BHI user koi system kaam ka ke ho (app kholo/band karo, folder/file banao, ram/model/battery/network/apps pooche, volume, screenshot, pc lock/sleep) to pehle SAHI tool call karo, phir SIRF tool ke real result ke mutabiq bolo. KABHI bhi jhoot na bolo (jaise "opening now" bina tool call ke) — jo tool result aaye wahi bolo, warna honestly bolo ke tool nahi chala.';
+        const withTools = defaultPrompt + '\n\nSYSTEM ACTIONS — IMPORTANT: Aapke paas system-control tools hain (open_app, close_app, read_notepad, write_notepad, notepad_tabs, create_folder, create_file, open_path, set_volume, take_screenshot, lock_pc, get_ram, get_model, get_disks, get_battery, get_network, get_cpu, get_running_apps, get_desktop, list_folder, read_clipboard, write_clipboard, list_recycle_bin, empty_recycle_bin, uninstall_app, get_temperature, get_volume, volume_mute). RULES: (1) JAB BHI user koi system kaam kahe (app kholo/band karo, folder/file banao, notepad ki content/tabs pooche, ram/model/battery/network/apps pooche, volume, screenshot, pc lock) to pehle SAHI tool call karo, phir SIRF tool ke real result ke mutabiq bolo. (2) KABHI jhoot na bolo ("opening now" bina tool call ke = sakht mana). (3) SIRF wahi karo jo user ne kaha — "folder banao" kaha to SIRF ek folder, uske andar kuch bhi KHUD SE na banao, koi extra file/subfolder/step apni marzi se NA karo. (4) Notepad ke tabs/content ke sawal par notepad_tabs / read_notepad tools use karo — "pata nahi" bolne se pehle hamesha tool try karo. (5) "Notepad me yeh likh do" par write_notepad tool use karo (user jo bole WOHI likho, kuch apni taraf se na jodo).';
 
         const setupMsg = {
           setup: {
@@ -185,9 +185,13 @@ class GeminiLiveSessionManager extends EventEmitter {
                 }
               }
             },
+            // Server-side VAD: config bhejne par server native defaults lagata hai
+            // (end-of-speech ~1s silence, prefix padding) — user ki baat khatam
+            // hote hi model TURANT jawab shuru karta hai, koi fixed turn-wait nahi.
+            realtimeInputConfig: {},
             systemInstruction: {
               parts: [{
-                text: defaultPrompt
+                text: withTools
               }]
             },
             tools: [{
@@ -390,6 +394,9 @@ class GeminiLiveSessionManager extends EventEmitter {
       const modelTurn = data.serverContent?.modelTurn;
       if (modelTurn && Array.isArray(modelTurn.parts)) {
         for (const part of modelTurn.parts) {
+          // Thinking/reasoning summary parts user ko KABHI nahi dikhani —
+          // ye model ke internal notes hain (chat me ulta jawab jaisa lagta tha).
+          if (part.thought) continue;
           // Audio Part (PCM 24kHz)
           if (part.inlineData && part.inlineData.data) {
             this.emit('live:audio', { mimeType: part.inlineData.mimeType || 'audio/pcm;rate=24000', data: part.inlineData.data });

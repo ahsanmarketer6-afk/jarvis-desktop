@@ -72,6 +72,75 @@ const QUERIES = {
   async get_volume() {
     const v = await bridge.volume('get');
     return v.ok ? `Volume ${v.volumePercent}% hai, ${v.muted ? 'muted' : 'muted nahi'}` : 'Volume padh nahi saka.';
+  },
+  async notepad_tabs() {
+    /* Win11 notepad: ek process mein SAARI windows — EnumWindows se exact count,
+       UIA TabItems se tab names (Get-Process sirf 1 title deta tha = ghalat jawab).
+       GHOST-GROUP FILTER: UIA kabhi-kabhi aisi Notepad-class entries deta hai jo
+       REAL window nahi (invisible host, audio device settings, etc.) — sirf wohi
+       group ginte hain jiska naam winsall ke REAL window title se match karta hai. */
+    const wins = await bridge.windowsAll('notepad', 'Notepad');
+    if (!wins.length) return 'Notepad abhi khula nahi hai — koi tab/window nahi.';
+    const realTitles = wins.map(w => w.title);
+    const tabInfo = (await bridge.notepadTabs()).filter(g =>
+      realTitles.some(rt => rt === g.window || rt.includes(g.window) || g.window.includes(rt)));
+    const allTabs = [];
+    for (const t of tabInfo) for (const name of (t.tabs || [])) allTabs.push(name);
+    if (allTabs.length > wins.length) {
+      return `Notepad mein ${allTabs.length} tabs khule hain (Win11 tabbed UI, ${wins.length} window group): ${allTabs.map((t, i) => `${i + 1}. "${t}"`).join(', ')}. Kisi tab ka content chahiye to naam batao — read_notepad se EXACT parh dunga.`;
+    }
+    return `Notepad mein ${wins.length} window(s)/tab(s) khule hain: ` + wins.map((w, i) => `${i + 1}. "${w.title}"`).join(', ') + '. Content chahiye to naam batao — read_notepad se EXACT parh dunga.';
+  },
+  async read_notepad({ title }) {
+    const wins = await bridge.windowsAll('notepad', 'Notepad');
+    if (!wins.length) return 'Notepad khula hi nahi hai.';
+    let win = null;
+    if (title && String(title).trim()) {
+      const t = String(title).toLowerCase();
+      win = wins.find(w => String(w.title).toLowerCase().includes(t));
+      if (!win) return `"${title}" naam ki koi notepad window nahi mili. Khuli windows: ${wins.map(w => w.title).join(' | ')}`;
+    } else if (wins.length === 1) win = wins[0];
+    else return `Notepad mein ${wins.length} windows hain (${wins.map(w => w.title).join(' | ')}). Kis ka content parhna hai? Naam batao.`;
+    /* DISK-RESOLUTION FIRST: title file-backed ho (notes.txt) to asli file disk se
+       parho — exact content, guess zero. Save-not-file ho to honestly batao. */
+    const fileTitle = String(win.title).replace(/\s*[-–]\s*Notepad.*$/i, '').trim();
+    const recent = await bridge.resolveRecentFile(fileTitle || win.title);
+    if (recent) {
+      const r = await bridge.readTextFile(recent);
+      if (r && r.content != null) {
+        return `Notepad window "${win.title}" ki file (${recent}) ka EXACT content hai: --- ${r.content.slice(0, 1200)} --- (source: disk file, ${r.size} bytes)`;
+      }
+    }
+    /* UNSAVED window: UI Automation se BINA focus/clipboard ke parho — exact text.
+       (Pehle clipboard+focus trick thi jo GHALAT window ka content de deti thi —
+       user ka clipboard jhooti "notepad content" ban jata tha. UIA se ghost-read
+       namumkin hai aur user ka kaam disturb nahi hota.) */
+    try {
+      const uia = await bridge.uiaReadWindow(win.title);
+      if (uia.ok && uia.text != null) {
+        return `Notepad window "${win.title}" ka EXACT content hai: --- ${String(uia.text).slice(0, 1200)} --- (source: window text, ${String(uia.text).length} chars)`;
+      }
+    } catch (e) { /* fall through */ }
+    /* TAB-FALLBACK: Win11 notepad mein multiple files EK window ke TABS hoti hain —
+       title match na ho to tab list mein dhoondo, activate karo, phir UIA read. */
+    try {
+      const tabInfo = await bridge.notepadTabs();
+      const allTabs = [];
+      for (const t of tabInfo) for (const name of (t.tabs || [])) allTabs.push(name);
+      const match = allTabs.find(n => n.toLowerCase().includes(fileTitle.toLowerCase()) || fileTitle.toLowerCase().includes(n.split(' - ')[0].toLowerCase()));
+      if (match) {
+        const act = await bridge.notepadActivateTab(match);
+        if (act.ok) {
+          await new Promise(s => setTimeout(s, 700)); // window title ab isi tab ka ban jata hai
+          const uia2 = await bridge.uiaReadWindow('');
+          if (uia2.ok && uia2.text != null) {
+            return `Notepad tab "${match}" activated karke parha — EXACT content: --- ${String(uia2.text).slice(0, 1200)} --- (source: window text after tab activation, ${String(uia2.text).length} chars)`;
+          }
+          return `Tab "${match}" activate ho gaya lekin content parh nahi saka — window text nahi mila (honest report).`;
+        }
+      }
+    } catch (e) { /* fall through */ }
+    return `Window "${win.title}" ka content parh nahi saka (unsaved hai aur window text nahi mila) — honest report. Save ho to file bata do, disk se parh lunga.`;
   }
 };
 
@@ -163,6 +232,24 @@ const ACTIONS = {
     logAction('system-action', 'power.sleep', null, r, r.ok, r.ok ? 'success' : 'failed', null);
     return r.ok ? 'PC sleep par ja raha hai.' : 'Sleep fail hua.';
   },
+  async write_notepad({ title, text }) {
+    const t0 = Date.now();
+    const wins = await bridge.windowsAll('notepad', 'Notepad');
+    if (!wins.length) { logAction('app-control', 'write.notepad', title || null, null, false, 'failed', Date.now() - t0); return 'Notepad khula hi nahi hai — pehle notepad kholo, phir likh dunga.'; }
+    let win = null;
+    if (title && String(title).trim()) {
+      const tt = String(title).toLowerCase();
+      win = wins.find(w => String(w.title).toLowerCase().includes(tt));
+      if (!win) return `"${title}" naam ki koi notepad window nahi mili. Khuli windows: ${wins.map(w => w.title).join(' | ')}`;
+    } else if (wins.length === 1) win = wins[0];
+    else return `Notepad mein ${wins.length} windows hain (${wins.map(w => w.title).join(' | ')}). Kis mein likhna hai, naam batao.`;
+    const r = await bridge.uiaWriteWindow(win.title, String(text || ''));
+    /* RULE 7: verify — wapas parh kar dekho ke likha WAAKAI gaya */
+    let verified = false;
+    if (r.ok) { const chk = await bridge.uiaReadWindow(win.title); verified = chk.ok && String(chk.text || '').slice(0, 200) === String(text || '').slice(0, 200); }
+    logAction('app-control', 'write.notepad', win.title, { verified }, verified, verified ? 'success' : 'failed', Date.now() - t0);
+    return verified ? `Notepad window "${win.title}" mein likh diya aur verify bhi kar liya. (Ye editor text hai — save karna ho to bolo.)` : `Likha nahi ja saka (editor write nahi hua) — honest report.`;
+  },
   async write_clipboard({ text }) {
     const t0 = Date.now();
     const r = await bridge.clipboard('set', String(text || ''));
@@ -220,6 +307,9 @@ const DECLS = {
     { name: 'list_folder', description: 'Kisi drive ya folder (jaise D drive, ya D:\\Projects) mein kitne aur kaunse folders/files hain.', parameters: { type: 'object', properties: { path: { type: 'string', description: 'Windows path jaise "D:\\" ya "D:\\Projects" ya "desktop"' } }, required: ['path'] } },
     { name: 'read_clipboard', description: 'Clipboard par kya hai ka sawal.' },
     { name: 'get_volume', description: 'Current volume kitna hai ka sawal.' },
+    { name: 'notepad_tabs', description: 'Notepad mein kitne tabs/windows khule hain — exact count + titles ka sawal.' },
+    { name: 'read_notepad', description: 'Notepad kisi window/tab ka EXACT content parho (file-backed ho to disk se, warna window text se — bina focus kiye).', parameters: { type: 'object', properties: { title: { type: 'string', description: 'window/tab title ka hissa (jaise notes.txt) — optional, ek window ho to zaroori nahi' } } } },
+    { name: 'write_notepad', description: 'Notepad kisi khuli window ke editor mein text LIKHO (user ne kaha "notepad me yeh likh do" tab). Ye sirf window ka editor set karta hai — file save NAHI karta.', parameters: { type: 'object', properties: { title: { type: 'string', description: 'window title ka hissa — optional, ek window ho to zaroori nahi' }, text: { type: 'string', description: 'jo likhna hai' } }, required: ['text'] } },
     { name: 'open_app', description: 'App open karo — notepad, calculator, chrome, vscode, koi bhi. VERIFIED.', parameters: { type: 'object', properties: { name: { type: 'string', description: 'app name jaise notepad' } }, required: ['name'] } },
     { name: 'close_app', description: 'App band karo (unsaved data check hota hai). VERIFIED.', parameters: { type: 'object', properties: { name: { type: 'string', description: 'app/process name jaise notepad' } }, required: ['name'] } },
     { name: 'create_folder', description: 'Folder banao kisi bhi jagah (desktop/drive/location). VERIFIED via fs.', parameters: { type: 'object', properties: { name: { type: 'string', description: 'folder ka naam' }, location: { type: 'string', description: '"desktop" ya "D:\\" ya "D:\\Projects" — optional, default desktop' } }, required: ['name'] } },
