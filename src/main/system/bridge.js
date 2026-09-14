@@ -247,19 +247,21 @@ Start-Sleep -Milliseconds $WaitMs
 /* UI Automation: window ka text BINA focus/clipboard ke parhna (unsaved windows
    bhi!) aur likhna ("notepad me yeh likh do"). Ghost-read/focus-steal dono khatam.
    NOTE: script ke andar sirf PS-style (#) comments — JS block comments PS ko todte hain. */
-  uiaread: `param([string]$Title = '')
+  uiaread: `param([string]$Title = '', [string]$Proc = 'notepad')
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 $root = [System.Windows.Automation.AutomationElement]::RootElement
-$clsCond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ClassNameProperty, 'Notepad')
-$windows = $root.FindAll([System.Windows.Automation.TreeScope]::Children, $clsCond)
-/* Win11 notepad editor = ControlType.Document (RichEditD2DPT); classic = Edit. Dono dhoondo. */
+# GENERIC window class: notepad mode 'Notepad' class filter; doosri apps ke liye
+# saari top-level windows (har app ki apni class hoti hai) title se match.
+$clsFilter = $Proc -eq 'notepad'
+$allTop = $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)
+# Win11 notepad editor = ControlType.Document (RichEditD2DPT); classic = Edit. Dono dhoondo.
 $editC = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Edit)
 $docC = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Document)
-$target = New-Object System.Windows.Automation.OrCondition($editC, $docC)
-foreach ($w in $windows) {
-  # PARTIAL title match - user 'untitled' bole to 'Untitled - Notepad' bhi mile
-  # (exact -ne match par likha hua window kabhi nahi milti thi).
+$textC = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Text)
+$target = New-Object System.Windows.Automation.OrCondition(@($editC, $docC, $textC))
+foreach ($w in $allTop) {
+  if ($clsFilter) { if ($w.Current.ClassName -ne 'Notepad') { continue } }
   if ($Title -and ($w.Current.Name -notlike "*$Title*")) { continue }
   $edits = $w.FindAll([System.Windows.Automation.TreeScope]::Descendants, $target)
   foreach ($e in $edits) {
@@ -343,16 +345,18 @@ foreach ($w in $windows) {
 }
 "OK=false"`,
 
-  uiawrite: `param([string]$Title = '', [string]$Text = '')
+  uiawrite: `param([string]$Title = '', [string]$Text = '', [string]$Proc = 'notepad')
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 $root = [System.Windows.Automation.AutomationElement]::RootElement
-$clsCond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ClassNameProperty, 'Notepad')
-$windows = $root.FindAll([System.Windows.Automation.TreeScope]::Children, $clsCond)
+$clsFilter = $Proc -eq 'notepad'
+$allTop = $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)
 $editC = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Edit)
 $docC = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Document)
-$target = New-Object System.Windows.Automation.OrCondition($editC, $docC)
-foreach ($w in $windows) {
+$target = New-Object System.Windows.Automation.OrCondition(@($editC, $docC))
+foreach ($w in $allTop) {
+  if ($clsFilter) { if ($w.Current.ClassName -ne 'Notepad') { continue } }
+  elseif ($Proc -and ($w.Current.Name -notmatch [regex]::Escape($Proc)) -and -not $Title) { continue }
   # PARTIAL title match - 'untitled' se 'Untitled - Notepad' bhi match ho (FALSE-FAIL fix):
   # pehle exact -ne tha jis wajah se user ke bole hue naam par window mil hi nahi thi.
   if ($Title -and ($w.Current.Name -notlike "*$Title*")) { continue }
@@ -384,8 +388,41 @@ foreach ($w in $windows) {
     if (-not $val) { try { $tp = $e.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern); $val = $tp.DocumentRange.GetText(8000) } catch { } }
     if ($val -and $val -like "*$Needle*") { "FOUND=true"; "WIN=" + $w.Current.Name; exit 0 }
   }
+}"FOUND=false"`,
+
+  /* GENERIC APP CLICK: kisi bhi app ke button/tab/menu-item par click (UIA
+     InvokePattern/SelectionItemPattern/LegacyIAccessible se). Obsidian/Notion
+     jaisi apps ke liye — koi app-specific code nahi, kisi bhi window title
+     ke andar naam se control dhoondta hai. */
+  uiclick: `param([string]$Title = '', [string]$Name = '')
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+$root = [System.Windows.Automation.AutomationElement]::RootElement
+$allTop = $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)
+foreach ($w in $allTop) {
+  if ($Title -and ($w.Current.Name -notlike "*$Title*")) { continue }
+  $cond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, $Name)
+  # pehle EXACT naam, phir CONTAINS fallback (UIA cached names chhote hote hain)
+  $el = $w.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
+  if (-not $el) {
+    $all = $w.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+    foreach ($c in $all) { if ($c.Current.Name -like "*$Name*") { $el = $c; break } }
+  }
+  if ($el) {
+    try { ($el.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)).Invoke(); "OK=true"; "EL=" + $el.Current.Name; exit 0 } catch { }
+    try { ($el.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)).Select(); "OK=true"; "EL=" + $el.Current.Name; exit 0 } catch { }
+    try { ($el.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)).Toggle(); "OK=true"; "EL=" + $el.Current.Name; exit 0 } catch { }
+    # aakhri resort: mouse-click element ke center par (SetCursorPos + mouse_event)
+    try {
+      $r = $el.Current.BoundingRectangle
+      Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y); [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, UIntPtr e);' -Name U32 -Namespace W
+      [W.U32]::SetCursorPos([int]($r.X + $r.Width/2), [int]($r.Y + $r.Height/2))
+      [W.U32]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero); [W.U32]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
+      "OK=true"; "EL=" + $el.Current.Name; exit 0
+    } catch { }
+  }
 }
-"FOUND=false"`
+"OK=false"`
 };
 
 /* ── Confirmation plumbing (premium dialog in renderer) ───────────── */
@@ -786,6 +823,31 @@ function findKnownApp(name) {
   /* Urdu/Hinglish aliases — user bole "calculator kholo" ya "calculator app" */
   const ALIAS = { 'calculator': 'calc', 'hisab': 'calc', 'hisaab': 'calc', 'paint': 'mspaint', 'drawing': 'mspaint', 'note': 'notepad', 'notes': 'notepad' };
   if (ALIAS[key] && ALIAS[key] !== key) return findKnownApp(ALIAS[key]);
+  /* APP-DATA RESOLVERS: popular apps jo Start Menu aliases se miss ho jati hain.
+     Obsidian: %APPDATA%/obsidian/obsidian.json = REAL vault registry (installed vaults).
+     Notion: LOCALAPPDATA Programs. Dono empirically verified paths. */
+  const appDataResolvers = {
+    'obsidian': () => {
+      try {
+        const cfgPath = path.join(process.env.APPDATA || '', 'obsidian', 'obsidian.json');
+        if (fs.existsSync(cfgPath)) {
+          const j = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+          const vaults = Object.values(j.vaults || {});
+          const open = vaults.find(v => v.open) || vaults[0];
+          if (open && open.path && fs.existsSync(open.path)) return open.path; // vault folder — Jarvis isi mein notes likhta hai
+        }
+      } catch (e) { /* fall through */ }
+      const exe = path.join(process.env.LOCALAPPDATA || '', 'Programs', 'obsidian', 'Obsidian.exe');
+      return fs.existsSync(exe) ? exe : null;
+    },
+    'notion': () => {
+      const exe = path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Notion', 'Notion.exe');
+      if (fs.existsSync(exe)) return exe;
+      const exe2 = 'C:\\Program Files\\Notion\\Notion.exe';
+      return fs.existsSync(exe2) ? exe2 : null;
+    }
+  };
+  if (appDataResolvers[key]) { const r = appDataResolvers[key](); if (r) return { path: r, source: key === 'obsidian' ? 'obsidian-vault-config' : 'appdata' }; }
   const local = path.join(process.env.LOCALAPPDATA || '', 'Programs');
   const guesses = [
     path.join(local, 'Microsoft VS Code', 'Code.exe'),
@@ -965,14 +1027,14 @@ async function sendKeys(keys, waitMs) {
 
 /* UIA window text read/write — BINA focus ke (unsaved notepad windows included).
    Returns { ok, window, text } / { ok, window } — honest when not found. */
-async function uiaReadWindow(title) {
-  const r = await ps('uiaread', { Title: title || '' }, 15000);
+async function uiaReadWindow(title, proc = 'notepad') {
+  const r = await ps('uiaread', { Title: title || '', Proc: proc }, 20000);
   const kv = parseKV(r.stdout);
   return { ok: !!(kv.map.WIN && kv.map.TEXT != null), window: kv.map.WIN || null, text: kv.map.TEXT != null ? kv.map.TEXT : null };
 }
 
-async function uiaWriteWindow(title, text) {
-  const r = await ps('uiawrite', { Title: title || '', Text: String(text || '') }, 15000);
+async function uiaWriteWindow(title, text, proc = 'notepad') {
+  const r = await ps('uiawrite', { Title: title || '', Text: String(text || ''), Proc: proc }, 20000);
   const kv = parseKV(r.stdout);
   return { ok: kv.map.OK === 'true', window: kv.map.WIN || null };
 }
@@ -1017,12 +1079,20 @@ async function notepadActivateTab(tabName) {
   return { ok: kv.map.OK === 'true', tab: kv.map.TAB || null };
 }
 
+/* GENERIC APP UI: kisi bhi app ke UI controls (buttons/tabs/menu items) par
+   naam se click — Obsidian/Notion/etc. Koi app-specific code nahi. */
+async function uiClick(windowTitle, controlName) {
+  const r = await ps('uiclick', { Title: windowTitle || '', Name: controlName || '' }, 20000);
+  const kv = parseKV(r.stdout);
+  return { ok: kv.map.OK === 'true', element: kv.map.EL || null };
+}
+
 /* ══════════════════ Exports ══════════════════ */
 module.exports = {
   init, requestConfirmation, resolveConfirmation,
   ps, SCRIPT_DIR,
   ramInfo, cpuInfo, hardwareInfo, disksInfo, batteryInfo, networkInfo, tempInfo, fullHardwareReport,
   desktopPath, listDrives, listDir, mkdirNested, writeTextFile, readTextFile, openPath, moveOrRename, listDesktop, organizeDesktop,
-  runningApps, windowsOf, windowsAll, notepadTabs, notepadActivateTab, resolveApp, startApp, closeApp, resolveRecentFile, activateWindow, sendKeys, uiaReadWindow, uiaWriteWindow, uiaVerifyText,
+  runningApps, windowsOf, windowsAll, notepadTabs, notepadActivateTab, resolveApp, startApp, closeApp, resolveRecentFile, activateWindow, sendKeys, uiaReadWindow, uiaWriteWindow, uiaVerifyText, uiClick,
   volume, brightness, screenshot, clipboard, clipboardSeq, power, recycleBin, lookupUninstall, verifyUninstalled
 };

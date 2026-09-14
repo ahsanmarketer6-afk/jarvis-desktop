@@ -416,6 +416,11 @@ function renderChat(container) {
     window.__liveListenersBound = true;
     window.jarvis.voice.live.onAudio((data) => {
       if (data && data.data) {
+        // ECHO FIX: Jarvis ke bolne ke doran mic-ka-jawab chunking ROK do —
+        // warna speaker ka audio mic se wapis model ko jata hai (VAD never fires
+        // = lambi latency, turn kabhi complete nahi hota tha jab speakers chal rahe)
+        if (window.__liveMuteSink) { try { window.__liveMuteSink.gain.value = 0; } catch (e) {} }
+        window.__jarvisSpeaking = true;
         playLivePcmChunk(data.data, data.mimeType);
       }
     });
@@ -455,6 +460,9 @@ function renderChat(container) {
       stopSpeaking();
       setChatStatus('Listening to you… (interrupted)');
       chatApplyState('listening');
+      // Interrupt = Jarvis chup ho gaya — mic sink wapas khul do (echo fix reset)
+      if (window.__liveMuteSink) { try { window.__liveMuteSink.gain.value = 0.0001; } catch (e) {} }
+      window.__jarvisSpeaking = false;
     });
 
     window.jarvis.voice.live.onTurnComplete(() => {
@@ -465,6 +473,11 @@ function renderChat(container) {
         chatApplyState('idle');
         setChatStatus('⚡ Live voice active — bolo Boss');
       }
+      // Turn khatam = Jarvis chup — mic sink wapas khul do (echo fix reset)
+      setTimeout(() => {
+        if (window.__liveMuteSink) { try { window.__liveMuteSink.gain.value = 0.0001; } catch (e) {} }
+        window.__jarvisSpeaking = false;
+      }, 350); // audio buffer flush ka thoda waqt
     });
 
     window.jarvis.voice.live.onError((data) => {
@@ -603,15 +616,17 @@ function renderChat(container) {
         window.jarvis.voice.live.streamAudio(base64Chunk);
       };
 
-      // NO loopback — but a ScriptProcessor only FIRE its onaudioprocess when it
-      // reaches the destination, so connect through a ZERO-GAIN node: complete
-      // graph, silence on speakers. (Previous fix dropped destination entirely,
-      // which killed the mic callback completely — "mic se awaaz nahi ja rahi".)
+      // LATENCY + ECHO FIX: ScriptProcessor ko destination chalana ZAROORI hai
+      // (warna onaudioprocess fire nahi hota) lekin sirf jab SPEAKERS active hon —
+      // Jarvis ke bolne ke doran mic uska audio wapis bhejta tha (echo = VAD delay
+      // + model confusion). silentSink ki gain DYNAMIC hai: Jarvis bolta hai to 0
+      // par mute (mic chunk nahi bhejte), chup rehta hai to 0.0001 (graph alive).
       source.connect(scriptProcessor);
       const silentSink = audioContext.createGain();
-      silentSink.gain.value = 0;
+      silentSink.gain.value = 0.0001;
       scriptProcessor.connect(silentSink);
       silentSink.connect(audioContext.destination);
+      window.__liveMuteSink = silentSink; // onAudio handler mute/unmute karta hai
 
       liveActive = true;
       chatState.recording = true;

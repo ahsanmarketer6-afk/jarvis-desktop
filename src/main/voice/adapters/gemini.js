@@ -667,7 +667,7 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
 
     if (isLive) {
       console.log(`[Gemini Voice Adapter] Target model "${cleanModel}" is a Live API WebSocket model. Executing Live WebSocket test...`);
-      return await this.testVoiceLive(cleanKey, voice, cleanModel);
+      return await this.testVoiceLiveWithRetry(cleanKey, voice, cleanModel);
     }
 
     try {
@@ -683,7 +683,7 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
       // If REST API fails because this model only supports bidiGenerateContent WebSocket:
       if (err.message && (err.message.includes('bidiGenerateContent') || err.message.includes('WebSocket') || err.message.includes('Live'))) {
         console.log(`[Gemini Voice Adapter] REST call indicated WebSocket required for "${cleanModel}". Automatically rerouting to Live WebSocket test...`);
-        return await this.testVoiceLive(cleanKey, voice, cleanModel);
+        return await this.testVoiceLiveWithRetry(cleanKey, voice, cleanModel);
       }
 
       return {
@@ -691,6 +691,22 @@ class GeminiVoiceAdapter extends BaseVoiceAdapter {
         error: err.message
       };
     }
+  }
+
+  /**
+   * Google's Live endpoint sometimes drops the probe socket server-side BEFORE
+   * setupComplete (Code 1006/1011 — transient infra hiccup, NOT a model/voice
+   * rejection; the same model+voice works on the immediate next attempt). One
+   * retry after a short backoff prevents a false "voice rejected" verdict.
+   */
+  async testVoiceLiveWithRetry(cleanKey, voice, cleanModel) {
+    let res = await this.testVoiceLive(cleanKey, voice, cleanModel);
+    if (!res.success && /Code (1006|1011)\b/i.test(res.error || '')) {
+      console.warn('[Gemini Voice Adapter] Transient Live drop (1006/1011) — retrying test once after 2s...');
+      await new Promise(r => setTimeout(r, 2000));
+      res = await this.testVoiceLive(cleanKey, voice, cleanModel);
+    }
+    return res;
   }
 
   /**

@@ -178,7 +178,7 @@ class GeminiLiveSessionManager extends EventEmitter {
         try { rosterBlock = require('../orchestrator/base-agent').registry.roster(); } catch (e) { rosterBlock = ''; }
         const withTools = defaultPrompt
           + '\n\nYOUR AGENTS (live registry — jab user pooche kitne agents hain, isi se EXACT count + names batao):\n' + (rosterBlock || '(registry unavailable)')
-          + '\n\nSYSTEM ACTIONS — IMPORTANT: Aapke paas system-control tools hain (get_time, open_app, close_app, read_notepad, write_notepad, notepad_tabs, create_folder, create_file, open_path, set_volume, take_screenshot, lock_pc, get_ram, get_model, get_disks, get_battery, get_network, get_cpu, get_running_apps, get_desktop, list_folder, read_clipboard, write_clipboard, list_recycle_bin, empty_recycle_bin, uninstall_app, get_temperature, get_volume, volume_mute). RULES: (1) JAB BHI user koi system/system-info kaam kahe (time/date, app kholo/band karo, folder/file banao, notepad ki content/tabs pooche, ram/model/battery/network/apps pooche, volume, screenshot, pc lock) to pehle SAHI tool call karo, phir SIRF tool ke real result ke mutabiq bolo. (2) KABHI jhoot na bolo ("opening now" bina tool call ke = sakht mana). (3) SIRF wahi karo jo user ne kaha — "folder banao" kaha to SIRF ek folder, uske andar kuch bhi KHUD SE na banao, koi extra file/subfolder/step apni marzi se NA karo. (4) Notepad ke tabs/content ke sawal par notepad_tabs / read_notepad tools use karo — "pata nahi" bolne se pehle hamesha tool try karo. (5) "Notepad me yeh likh do" par write_notepad tool use karo (user jo bole WOHI likho, kuch apni taraf se na jodo). (6) TOOL RESULT HI TUMHARA JAWAB HAI: jab tool result aaye to usko NORMAL BOLCHAT me convert karke bolo ("Boss, likh diya aur verify bhi kar liya") — result ka RAW text / labels / implementation detail mat padho, aur result ke khilaf kuch mat bolo (result keh raha ho "likh diya" to kabhi mat bolo "nahi likha"). (7) close_app ke result me agar cancel/"rehne do" aaye to SAFA saaf bolo ke app band NAHI ki gayi.';
+          + '\n\nSYSTEM ACTIONS — IMPORTANT: Aapke paas system-control tools hain (get_time, open_app, close_app, read_notepad, write_notepad, SAVE_NOTEPAD, APP_READ, APP_CLICK, notepad_tabs, notepad_windows, create_folder, create_file, open_path, set_volume, take_screenshot, lock_pc, get_ram, get_model, get_disks, get_battery, get_network, get_cpu, get_running_apps, get_desktop, list_folder, read_clipboard, write_clipboard, list_recycle_bin, empty_recycle_bin, uninstall_app, get_temperature, get_volume, volume_mute). RULES: (1) JAB BHI user koi system/system-info kaam kahe (time/date, app kholo/band karo, folder/file banao, SAVE karna ho, notepad ki content/tabs/windows pooche, ram/model/battery/network/apps pooche, volume, screenshot, pc lock) to pehle SAHI tool call karo, phir SIRF tool ke real result ke mutabiq bolo. (2) KABHI jhoot na bolo ("opening now" / "save kar diya" / "bana diya" bina tool call aur tool ke verify ke = SAKHT MANA — tool call kiye BAGHAIR success khabar dena jhoot hai). (3) SAVE rule: "notepad ko save kar do" par **save_notepad** tool hai (content UIA se parh kar user ki location par disk par likhta hai, VERIFIED) — ye pehli choice hai; save_notepad fail ho tabhi read_notepad → create_file fallback. (4) Folder banao par create_folder — TOOL RESULT me "verified" likha ho tabhi "ban gaya" bolo, warna honest fail bolo. (5) SIRF wahi karo jo user ne kaha — extra steps apni marzi se NA karo. (6) Notepad ke tabs ke sawal par notepad_tabs, windows ke sawal par notepad_windows (SEPARATE top-level windows — tabs se alag), content ke sawal par read_notepad — "pata nahi" bolne se pehle hamesha tool try karo (tab ka naam diya ho to read_notepad us tab ko activate karke parhta hai). (7) "Notepad me yeh likh do" par write_notepad (user jo bole WOHI likho). (8) KOI BHI app (obsidian, notion, word, koi bhi): kholna ho open_app, uska content parhna ho app_read, uske button/menu/tab par click karna ho app_click — app-specific limitations ke liye MAZBOORI NAHI, pehle tool try karo, sach mein support na ho to honest bolo. (9) TOOL RESULT HI TUMHARA JAWAB HAI: result ko NORMAL bolchat me convert karke bolo — raw labels/implementation detail mat padho, aur result ke khilaf KABHI mat bolo (result keh raha ho "likh diya/verify" to "nahi likha" bolna mana). (10) close_app ke result me cancel/"rehne do" aaye to saaf bolo ke band NAHI ki gayi.';
 
         const setupMsg = {
           setup: {
@@ -193,10 +193,21 @@ class GeminiLiveSessionManager extends EventEmitter {
                 }
               }
             },
-            // Server-side VAD: config bhejne par server native defaults lagata hai
-            // (end-of-speech ~1s silence, prefix padding) — user ki baat khatam
-            // hote hi model TURANT jawab shuru karta hai, koi fixed turn-wait nahi.
-            realtimeInputConfig: {},
+            // Server-side VAD — TUNED for instant turns (LATENCY FIX):
+            // endOfSpeechSensitivity HIGH = user ke chup hote hi (~600-800ms) turn
+            // complete hota hai (default LOW ~1.5-2s wait karta tha). startOfSpeech
+            // HIGH = pehla word jaise hi bolte hi transcription shuru.
+            // NOTE: enum values FULL names hain (START_SENSITIVITY_HIGH) — sirf
+            // 'HIGH' likhne par server Code 1007 Invalid-value reject karta tha.
+            realtimeInputConfig: {
+              automaticActivityDetection: {
+                disabled: false,
+                startOfSpeechSensitivity: 'START_SENSITIVITY_HIGH',
+                endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
+                prefixPaddingMs: 100,
+                silenceDurationMs: 500
+              }
+            },
             systemInstruction: {
               parts: [{
                 text: withTools
@@ -431,6 +442,7 @@ class GeminiLiveSessionManager extends EventEmitter {
       // SystemBridge → nateeja wapis session ko (Jarvis verified truth bolta hai).
       const toolCall = data.toolCall;
       if (toolCall && Array.isArray(toolCall.functionCalls) && toolCall.functionCalls.length) {
+        this._hadToolCallThisTurn = true;
         (async () => {
           for (const fc of toolCall.functionCalls) {
             if (!fc || !fc.name) continue;
@@ -478,19 +490,39 @@ class GeminiLiveSessionManager extends EventEmitter {
 
       // 3. Turn Complete: save utterance to DB activity & vault memory
       if (data.serverContent?.turnComplete) {
-        if (this.currentTurnTranscript && this.currentTurnTranscript.trim()) {
-          const finalUtterance = this.currentTurnTranscript.trim();
-          db.logActivity('Gemini Live', `Jarvis Live Reply: "${finalUtterance.slice(0, 60)}${finalUtterance.length > 60 ? '...' : ''}"`, null, 'success');
-          this.currentTurnTranscript = '';
+        /* ── LIE-GATE (Rule 1 enforcement): model ne SUCCESS bol diya ("ban gaya",
+           "save kar diya", "khol diya") LEKIN is turn mein KOI tool call nahi hua —
+           ye jhoot hai. Auto-correction: model ko usi waqt clientContent turn se
+           kahenge ke tumne tool call nahi kiya, ABHI karo. Sirf ACTION-intent
+           (banao/kholo/save) par trigger hota hai, sawal-par nahi. */
+        const said = (this.currentTurnTranscript || '').toLowerCase();
+        const successClaim = /(ban gaya|bana diya|save kar diya|save ho gaya|khol diya|open kar diya|band kar diya|likh diya|kar diya hai|successfully)/.test(said);
+        const actionIntent = this._lastUserUtterance && /(banao|bana do|kholo|khol do|open karo|band karo|save kar|likho|likh do|likh do|set karo|kar do)/.test(this._lastUserUtterance.toLowerCase());
+        if (successClaim && !this._hadToolCallThisTurn && actionIntent) {
+          const u = String(this._lastUserUtterance).slice(0, 200);
+          console.log('[Gemini Live] ⚠️ LIE-GATE: success claim without tool call — forcing real action turn. said:', said.slice(0, 80));
+          db.logActivity('Gemini Live', 'LIE-GATE correction: success claim without tool call', { userTurn: u.slice(0, 100) }, 'warning');
+          this.safeSend('voice:live:text', { text: '(system)', isUser: false, lieGate: true });
+          try {
+            this.sendClientText(`(SYSTEM CORRECTION — JARVIS, tumne "${said.slice(0, 60)}" bola LEKIN koi tool call NAHI hua, ye jhoot tha. User ne kaha tha: "${u}". ABHI asli tool call karo (create_folder/open_app/save_notepad/write_notepad jo bhi sahi ho), phir sirf TOOL RESULT ke mutabiq bolo. Agar waqai nahi kar sakta to honestly bolo.)`);
+          } catch (e) { console.error('[Gemini Live] lie-gate correction send fail:', e.message); }
         }
-        // Log the user's spoken turn too (usage panel counts real live turns)
-        if (this._lastUserUtterance && this._lastUserUtterance.trim()) {
-          db.logActivity('Gemini Live', `User Live Turn: "${this._lastUserUtterance.trim().slice(0, 60)}"`, null, 'success');
-          this._lastUserUtterance = '';
-        }
-        this.emit('live:turnComplete');
-        this.safeSend('voice:live:turnComplete');
+        this._hadToolCallThisTurn = false;
       }
+      // DB activity log (turn transcripts) — lie-gate ke BAAD (transcript clear
+      // order stable rakhta hai: lie-gate ne `said` pehle hi nikal liya hota hai)
+      if (this.currentTurnTranscript && this.currentTurnTranscript.trim()) {
+        const finalUtterance = this.currentTurnTranscript.trim();
+        db.logActivity('Gemini Live', `Jarvis Live Reply: "${finalUtterance.slice(0, 60)}${finalUtterance.length > 60 ? '...' : ''}"`, null, 'success');
+        this.currentTurnTranscript = '';
+      }
+      // Log the user's spoken turn too (usage panel counts real live turns)
+      if (this._lastUserUtterance && this._lastUserUtterance.trim()) {
+        db.logActivity('Gemini Live', `User Live Turn: "${this._lastUserUtterance.trim().slice(0, 60)}"`, null, 'success');
+        this._lastUserUtterance = '';
+      }
+      this.emit('live:turnComplete');
+      this.safeSend('voice:live:turnComplete');
 
     } catch (err) {
       console.error('[Gemini Live API] Error parsing incoming message:', err);
